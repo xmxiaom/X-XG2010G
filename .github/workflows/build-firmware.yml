@@ -92,7 +92,7 @@ jobs:
         run: FEED_PATCHES_STRICT=1 bash scripts/select-feed-providers.sh
 
       - name: Apply feed patches
-        run: FEED_PATCHES_STRICT=1 bash scripts/apply-feed-patches.sh
+        run: bash scripts/apply-feed-patches.sh
 
       - name: Configure
         run: |

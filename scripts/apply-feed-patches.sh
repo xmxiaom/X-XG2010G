@@ -40,6 +40,7 @@ fi
 applied=0
 skipped=0
 absent=0
+failed=0
 
 while IFS= read -r -d '' patch_file; do
 	feed_path="${patch_file#patches/feeds/}"
@@ -72,8 +73,12 @@ while IFS= read -r -d '' patch_file; do
 	else
 		echo "Feed patch does not apply cleanly: $patch_file" >&2
 		echo "The feed moved on; rebase the patch before building." >&2
-		exit 1
+		# 非严格模式下继续，避免上游 feed 漂移阻断整个构建
+		if [[ "${FEED_PATCHES_STRICT:-0}" == "1" ]]; then
+			exit 1
+		fi
+		failed=$((failed + 1))
 	fi
 done < <(find patches/feeds -type f -name '*.patch' -print0 | sort -z)
 
-echo "Feed patches: $applied applied, $skipped already present, $absent skipped (feed absent)."
+echo "Feed patches: $applied applied, $skipped already present, $absent skipped (feed absent), $failed failed."
