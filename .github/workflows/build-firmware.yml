@@ -84,6 +84,11 @@ jobs:
 
       - name: Install feeds
         run: |
+          # Windows 导出的仓库丢失了可执行位（git 在 Windows 上不记录 mode），
+          # 这里统一补回，否则 ./scripts/feeds 会 Permission denied (exit 126)。
+          find scripts -type f -exec chmod +x {} + 2>/dev/null || true
+          find . -maxdepth 3 -name '*.sh' -exec chmod +x {} + 2>/dev/null || true
+          chmod +x ./scripts/feeds
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           bash scripts/fix-stale-golang-host.sh
