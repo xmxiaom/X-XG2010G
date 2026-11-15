@@ -48,8 +48,16 @@ jobs:
           build_date=$(TZ=Asia/Shanghai date +'%Y%m%d')
           repo_commit_full=$(git rev-parse HEAD)
           repo_commit=$(git rev-parse --short=8 HEAD)
-          upstream_base=$(git merge-base HEAD upstream/master)
-          upstream_commit=$(git rev-parse --short=8 "$upstream_base")
+          # 本仓库是压缩历史（单提交），与 upstream 无共同祖先，
+          # merge-base 会失败。降级为「用 upstream 当前 HEAD」，
+          # 仅用于版本号标识，不影响构建。
+          upstream_base=$(git merge-base HEAD upstream/master 2>/dev/null || true)
+          if [ -n "$upstream_base" ]; then
+            upstream_commit=$(git rev-parse --short=8 "$upstream_base")
+          else
+            upstream_commit=$(git rev-parse --short=8 upstream/master)
+            echo "No merge-base with upstream (squashed history), using upstream HEAD: $upstream_commit" >&2
+          fi
           build_id="${build_date}-${repo_commit}-${upstream_commit}"
           # 文件名只保留 “日期-本机commit”，完整 build_id 落到 VERSION_CODE
           version_number="${build_date}-${repo_commit}"
