@@ -1,7 +1,8 @@
 diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
+index 42e5591..21e7f7e 100644
 --- a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
 +++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
-@@ -166,6 +166,8 @@
+@@ -166,6 +166,8 @@ return view.extend({
  		 * 10G line modes are offered. Both values stay valid in the daemons, so a
  		 * board configured with either one still runs.
  		 */
@@ -11,9 +12,10 @@ diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js b/luci
  		o.value('xgspon', _('XGS-PON 10G/10G'));
  		o.value('epon-10g-1g', _('10G-EPON 10G/1G'));
 diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
+index f1b0c1a..d0b120d 100644
 --- a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
 +++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
-@@ -506,6 +506,8 @@
+@@ -506,6 +506,8 @@ return view.extend({
  		 * 10G line modes are offered. Both values stay valid in the daemons, so a
  		 * board configured with either one still runs.
  		 */
@@ -22,3 +24,37 @@ diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js b/lu
  		o.value('xgpon', _('XG-PON 10G/2.5G'));
  		o.value('xgspon', _('XGS-PON 10G/10G'));
  		o.value('epon-10g-1g', _('10G-EPON 10G/1G'));
+diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js
+index 732cd1c..ab89ddc 100644
+--- a/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js
++++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js
+@@ -39,10 +39,10 @@ function isEponMode(mode) {
+ 
+ function modeLabel(mode) {
+ 	switch (mode) {
+-	case 'gpon': return _('GPON 2.5G/1.25G');
++	case 'gpon': return _('GPON');
+ 	case 'xgpon': return _('XG-PON 10G/2.5G');
+ 	case 'xgspon': return _('XGS-PON 10G/10G');
+-	case 'epon-1g': return _('EPON 1G/1G');
++	case 'epon-1g': return _('EPON');
+ 	case 'epon-10g-1g': return _('10G-EPON 10G/1G');
+ 	case 'epon-10g-10g': return _('10G-EPON 10G/10G');
+ 	case 'none': return _('Not active');
+diff --git a/luci-app-onu/po/zh_Hans/onu.po b/luci-app-onu/po/zh_Hans/onu.po
+index c44526e..a580912 100644
+--- a/luci-app-onu/po/zh_Hans/onu.po
++++ b/luci-app-onu/po/zh_Hans/onu.po
+@@ -337,6 +337,12 @@ msgstr "XG-PON 10G/2.5G"
+ msgid "XGS-PON 10G/10G"
+ msgstr "XGS-PON 10G/10G"
+ 
++msgid "GPON"
++msgstr "GPON"
++
++msgid "EPON"
++msgstr "EPON"
++
+ msgid "EPON 1G/1G"
+ msgstr "EPON 1G/1G"
+ 
