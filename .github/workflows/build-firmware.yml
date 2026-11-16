@@ -137,7 +137,21 @@ jobs:
       - name: Download sources
         shell: bash
         run: |
+          # 并行下载。个别包会因 GitHub 限流/瞬时网络失败（例如
+          # asterisk-chan-en75xx 的 git 源），失败不影响已下载的包。
+          set +e
           make download -j$(nproc) BUILD_LOG=1 2>&1 | tee download.log
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::warning::并行下载有失败，改为单线程重试缺失的包"
+            # 第二遍单线程只重试缺失项，对瞬时失败更稳
+            make download -j1 BUILD_LOG=1 2>&1 | tee -a download.log
+            rc=$?
+          fi
+          if [ $rc -ne 0 ]; then
+            echo "::warning::仍有源码未下载，但继续编译（编译阶段可能自行重试）"
+          fi
+          exit 0
 
       - name: Build Firmware
         shell: bash
