@@ -44,28 +44,21 @@ jobs:
           cp 2010.config .config
           make defconfig
 
-      - name: Build host tools (only what xpon needs)
+      - name: Build host tools
         run: |
-          # 直接 compile 某个包会跳过 tools/ 阶段，导致解压源码时
-          # 找不到 staging_dir/host/bin/libdeflate-gzip（第 1 次失败原因）。
+          # OpenWrt 的 tools/ 阶段必须完整跑一遍：它会构建整套 host 工具链
+          # （sed/gcc/binutils/libdeflate-gzip/patch/tar/...）。
           #
-          # 但 `make tools/install` 会构建全部 host 工具（含 gcc/binutils/
-          # python 等），在 CI 上要 1 小时以上。这里只构建 xpon 真正
-          # 依赖的：libdeflate-gzip（解压）、patch（打补丁）、
-          # find（feeds 脚本）、golang（仅 EPON/GPON 不需要，跳过）。
+          # 教训：单独 make tools/<name>/install 会失败，因为这些目标
+          # 依赖 target/linux/prereq 等前置条件，且相互依赖。
+          # 第 8 次验证就因此失败：
+          #   make: *** [toplevel.mk:272: tools/libdeflate/install] Error 1
+          #   bash: staging_dir/host/bin/sed: No such file or directory
+          #
+          # 正确做法：make tools/install 一次性构建全部 host 工具。
+          # 在 GitHub runner 上约 25-40 分钟。
           set -o pipefail
-          for t in libdeflate patch tar gzip findutils; do
-            echo "=== building host tool: $t ==="
-            make tools/$t/install -j$(nproc) BUILD_LOG=1 2>&1 | tail -5 || \
-              echo "  ($t skipped)"
-          done
-          # 兜底：若 libdeflate-gzip 仍缺失，用系统 gzip 代替
-          if [ ! -x staging_dir/host/bin/libdeflate-gzip ]; then
-            mkdir -p staging_dir/host/bin
-            printf '#!/bin/sh\nexec gzip "$@"\n' > staging_dir/host/bin/libdeflate-gzip
-            chmod +x staging_dir/host/bin/libdeflate-gzip
-            echo "  (created libdeflate-gzip shim -> system gzip)"
-          fi
+          make tools/install -j$(nproc) BUILD_LOG=1 2>&1 | tail -30
 
       - name: Download only PON deps
         run: |
