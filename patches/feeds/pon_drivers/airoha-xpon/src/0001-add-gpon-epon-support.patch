@@ -963,10 +963,10 @@ index 71414bc..c7d0b2f 100644
  #endif
 diff --git a/airoha-xpon/src/airoha-xpon-gpon-regs.h b/airoha-xpon/src/airoha-xpon-gpon-regs.h
 new file mode 100644
-index 0000000..93b4f62
+index 0000000..700b440
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon-regs.h
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,157 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Airoha AN7581 GPON MAC 寄存器定义
@@ -1040,10 +1040,12 @@ index 0000000..93b4f62
 +/* SCU（系统控制单元）复位控制寄存器 1，走 regmap 而非 gpon_base。
 + * 偏移与 PON MAC 复位位来自上游 airoha-xpon-epon.c:153-154。
 + */
-+/* 超帧计数器（原厂 gponDevGetSuperframe @0x1ea34，偏移 0x4358）
-+ * 低 30 位是计数值，高 2 位是内部状态标记
++/* 超帧计数器（原厂 gponDevGetSuperframe @0x1ea34）
++ * 原厂访问 g_gpon_mac_reg_BASE + 0x4358，
++ * 与本文件其他宏一致，减去 0x4000 后为 0x0358。
++ * 低 30 位是计数值，高 2 位是内部状态标记。
 + */
-+#define AIROHA_GPON_SUPERFRAME_COUNTER                       0x4358
++#define AIROHA_GPON_SUPERFRAME_COUNTER                       0x0358
 +#define AIROHA_GPON_SUPERFRAME_MASK                          0x3fffffff
 +
 +/* DBA 微调修正值寄存器（原厂 0x4350 / 0x4354，减 0x4000 后）
@@ -5087,10 +5089,10 @@ index ef8b0bb..54b4956 100644
  /*
 diff --git a/airoha-xpon/src/airoha-xpon-proto.c b/airoha-xpon/src/airoha-xpon-proto.c
 new file mode 100644
-index 0000000..f400945
+index 0000000..348888f
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-proto.c
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,170 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581/AN7583 xPON —— 协议操作表实现
@@ -5152,12 +5154,13 @@ index 0000000..f400945
 +/* ------------------------------------------------------------------ */
 +
 +static void xgpon_control_rx(struct airoha_xpon *xpon, struct sk_buff *skb,
-+			     const void *info)
++			     const struct airoha_pon_ctrl_rx_info *info)
 +{
 +	airoha_xpon_omci_receive(xpon->omci, skb, info);
 +}
 +
-+static bool xgpon_control_match(struct airoha_xpon *xpon, const void *info)
++static bool xgpon_control_match(struct airoha_xpon *xpon,
++				const struct airoha_pon_ctrl_rx_info *info)
 +{
 +	const struct airoha_pon_ctrl_rx_info *rx = info;
 +	u16 onu_id = READ_ONCE(xpon->onu_id);
@@ -5209,12 +5212,13 @@ index 0000000..f400945
 +/* ------------------------------------------------------------------ */
 +
 +static void epon_control_rx(struct airoha_xpon *xpon, struct sk_buff *skb,
-+			    const void *info)
++			    const struct airoha_pon_ctrl_rx_info *info)
 +{
 +	airoha_xpon_oam_receive(xpon->oam, skb, info);
 +}
 +
-+static bool epon_control_match(struct airoha_xpon *xpon, const void *info)
++static bool epon_control_match(struct airoha_xpon *xpon,
++			       const struct airoha_pon_ctrl_rx_info *info)
 +{
 +	/*
 +	 * QDMA 在描述符里标记 EPON OAM，
@@ -5261,10 +5265,10 @@ index 0000000..f400945
 +MODULE_DESCRIPTION("Airoha xPON protocol dispatch layer");
 diff --git a/airoha-xpon/src/airoha-xpon-proto.h b/airoha-xpon/src/airoha-xpon-proto.h
 new file mode 100644
-index 0000000..ee6492b
+index 0000000..af7c074
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-proto.h
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,126 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Airoha AN7581/AN7583 xPON —— 协议操作表（core 抽象层）
@@ -5297,6 +5301,8 @@ index 0000000..ee6492b
 + * 每个函数都对应上游 main.c 里的一处分派点。
 + * 未实现的槽位可以为 NULL，调用方需检查。
 + */
++struct airoha_pon_ctrl_rx_info;
++
 +struct airoha_xpon_proto_ops {
 +	/* 协议标识 */
 +	enum airoha_xpon_mode mode;
@@ -5335,8 +5341,9 @@ index 0000000..ee6492b
 +	 * OMCI 走 omci 对象，OAM 走 oam 对象，由协议自己决定
 +	 */
 +	void (*control_rx)(struct airoha_xpon *xpon, struct sk_buff *skb,
-+			   const void *info);
-+	bool (*control_match)(struct airoha_xpon *xpon, const void *info);
++			   const struct airoha_pon_ctrl_rx_info *info);
++	bool (*control_match)(struct airoha_xpon *xpon,
++			      const struct airoha_pon_ctrl_rx_info *info);
 +	void (*control_wake_tx)(struct airoha_xpon *xpon);
 +
 +	/*

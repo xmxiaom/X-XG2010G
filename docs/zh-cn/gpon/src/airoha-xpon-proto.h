@@ -30,6 +30,8 @@ struct seq_file;
  * 每个函数都对应上游 main.c 里的一处分派点。
  * 未实现的槽位可以为 NULL，调用方需检查。
  */
+struct airoha_pon_ctrl_rx_info;
+
 struct airoha_xpon_proto_ops {
 	/* 协议标识 */
 	enum airoha_xpon_mode mode;
@@ -68,8 +70,9 @@ struct airoha_xpon_proto_ops {
 	 * OMCI 走 omci 对象，OAM 走 oam 对象，由协议自己决定
 	 */
 	void (*control_rx)(struct airoha_xpon *xpon, struct sk_buff *skb,
-			   const void *info);
-	bool (*control_match)(struct airoha_xpon *xpon, const void *info);
+			   const struct airoha_pon_ctrl_rx_info *info);
+	bool (*control_match)(struct airoha_xpon *xpon,
+			      const struct airoha_pon_ctrl_rx_info *info);
 	void (*control_wake_tx)(struct airoha_xpon *xpon);
 
 	/*

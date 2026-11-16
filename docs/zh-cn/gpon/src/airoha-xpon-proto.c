@@ -59,12 +59,13 @@ EXPORT_SYMBOL_GPL(airoha_xpon_proto);
 /* ------------------------------------------------------------------ */
 
 static void xgpon_control_rx(struct airoha_xpon *xpon, struct sk_buff *skb,
-			     const void *info)
+			     const struct airoha_pon_ctrl_rx_info *info)
 {
 	airoha_xpon_omci_receive(xpon->omci, skb, info);
 }
 
-static bool xgpon_control_match(struct airoha_xpon *xpon, const void *info)
+static bool xgpon_control_match(struct airoha_xpon *xpon,
+				const struct airoha_pon_ctrl_rx_info *info)
 {
 	const struct airoha_pon_ctrl_rx_info *rx = info;
 	u16 onu_id = READ_ONCE(xpon->onu_id);
@@ -116,12 +117,13 @@ EXPORT_SYMBOL_GPL(airoha_xpon_xgpon_ops);
 /* ------------------------------------------------------------------ */
 
 static void epon_control_rx(struct airoha_xpon *xpon, struct sk_buff *skb,
-			    const void *info)
+			    const struct airoha_pon_ctrl_rx_info *info)
 {
 	airoha_xpon_oam_receive(xpon->oam, skb, info);
 }
 
-static bool epon_control_match(struct airoha_xpon *xpon, const void *info)
+static bool epon_control_match(struct airoha_xpon *xpon,
+			       const struct airoha_pon_ctrl_rx_info *info)
 {
 	/*
 	 * QDMA 在描述符里标记 EPON OAM，
