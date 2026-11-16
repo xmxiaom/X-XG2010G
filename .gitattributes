@@ -1,5 +1,10 @@
 * -text
 *.patch text eol=lf whitespace=-indent-with-non-tab,-space-before-tab,-tab-in-indent,-trailing-space
+
+# onu_config feed 的源文件是 CRLF（luci-app-onu 的 JS、airoha-ponctl 的 Rust），
+# 补丁必须保持 CRLF 才能 git apply 成功。这里覆盖上面的 eol=lf。
+patches/feeds/onu_config/**/*.patch -text
+
 *.sh text eol=lf
 *.dts text eol=lf
 *.dts[io] text eol=lf
