@@ -71,6 +71,12 @@
 /* SCU（系统控制单元）复位控制寄存器 1，走 regmap 而非 gpon_base。
  * 偏移与 PON MAC 复位位来自上游 airoha-xpon-epon.c:153-154。
  */
+/* 超帧计数器（原厂 gponDevGetSuperframe @0x1ea34，偏移 0x4358）
+ * 低 30 位是计数值，高 2 位是内部状态标记
+ */
+#define AIROHA_GPON_SUPERFRAME_COUNTER                       0x4358
+#define AIROHA_GPON_SUPERFRAME_MASK                          0x3fffffff
+
 #define AIROHA_GPON_SCU_RSTCTRL1                              0x834
 #define AIROHA_GPON_SCU_PON_MAC_RESET                         BIT(31)
 

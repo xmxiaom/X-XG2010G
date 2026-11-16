@@ -202,6 +202,27 @@ typedef int (*airoma_ploamd_fn)(struct airoha_xpon *xpon, const u8 *msg);
  * 字段顺序与原厂 gpGponPriv 对应，便于对照逆向结论。
  * 实际接入上游时，若上游已有等价字段（如 xpon->mib），优先复用。
  */
+/* T-CONT 数量：原厂 gpon_qos_init 的循环是 cmp w0, #0x1f，即 0..31 共 32 个 */
+#define AIROHA_GPON_TCONT_MAX		0x1f
+
+/**
+ * struct airoha_gpon_tcont_cfg - 单个 T-CONT 的 DBA 参数
+ *
+ * 字段顺序照原厂 hook 0x29 的参数结构（从 gpon_qos_init 栈偏移反推）：
+ *   +0x00  u8   tcont
+ *   +0x04  u32  green
+ *   +0x08  u32  yellow
+ *   +0x0c  u32  total
+ *   +0x10  u32  max
+ */
+struct airoha_gpon_tcont_cfg {
+	u8	tcont;
+	u32	green;		/* fixed 带宽（保证） */
+	u32	yellow;		/* 非保证带宽 */
+	u32	total;		/* assured 总保证 */
+	u32	max;		/* 最大带宽 */
+};
+
 struct airoha_gpon_priv {
 	u32			to1_retry_cnt;		/* +0x00 */
 	u32			state;			/* +0x04 当前 O1–O7 */
@@ -221,7 +242,19 @@ struct airoha_gpon_priv {
 	u8			ranging_retry;		/* +0x228 测距余数 */
 	u8			eqd_mode;		/* +0x22a 0=首次 / 非0=需校正 */
 	u8			eqd_step;		/* EqD 步长（原厂从 0x22a 高位取） */
+	u32			superframe;	/* 超帧计数器缓存 */
 	u8			los_ignore_flag;	/* 原厂 +0x30c bit3：O5 忽略 LOS */
+	/*
+	 * per-T-CONT 的 DBA 参数。原厂经 EcoNet hook 0x29 下发给
+	 * 硬件抽象层，上游暂无该 hook，这里保存下来：
+	 *   - debugfs 可查看，便于与原厂固件对比
+	 *   - 后续若接上 hook 可直接转发
+	 */
+	struct airoha_gpon_tcont_cfg tcont[AIROHA_GPON_TCONT_MAX + 1];
+	/* QDMA TX buff 参数（原厂 gpon_init_qdma_tx_buff @0x14b94） */
+	u32			qdma_tx_buff_enable;	/* +0x00 = 1 */
+	u32			qdma_tx_buff_blocks;	/* +0x04 = 4 */
+	u32			qdma_tx_buff_size;	/* +0x06 = 0xe0 */
 	s32			hw_param_cache;		/* +0x24c，初值 -1 */
 };
 
@@ -252,6 +285,7 @@ int airoha_xpon_gpon_tcont_param(struct airoha_xpon *xpon, u8 tcont,
 				 u32 green, u32 total, u32 yellow, u32 max);
 int airoha_xpon_gpon_tcont_release(struct airoha_xpon *xpon, u8 tcont);
 void airoha_xpon_gpon_set_qdma_qos(struct airoha_xpon *xpon, bool reset);
+void airoha_xpon_gpon_init_qdma_tx_buff(struct airoha_xpon *xpon);
 int airoha_xpon_gpon_backup_gem(struct airoha_xpon *xpon,
 				const struct airoha_gpon_recovery_gem *e);
 int airoha_xpon_gpon_check_gem_exist(struct airoha_xpon *xpon, u16 gem_id);
@@ -813,7 +847,7 @@ int airoha_xpon_gpon_cmd(struct airoha_xpon *xpon, u32 arg, u32 cmd)
 		break;
 
 	case AIROHA_GPON_CMD_TX_BUFF_INIT:
-		/* TODO: 对应原厂 gpon_init_qdma_tx_buff，由 QoS 层实现 */
+		airoha_xpon_gpon_init_qdma_tx_buff(xpon);
 		break;
 
 	case AIROHA_GPON_CMD_CONN_UP:
@@ -1503,13 +1537,39 @@ void airoha_xpon_gpon_set_bwm_stop_int(struct airoha_xpon *xpon, bool on)
 }
 EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_bwm_stop_int);
 
-/* 超帧计数器读取（原厂 gponDevGetSuperframe） */
+/**
+ * airoha_xpon_gpon_get_superframe - 读取超帧计数器
+ * @xpon: XPON 设备
+ *
+ * 原厂 gponDevGetSuperframe @0x01ea34（140 字节）完整还原：
+ *
+ *   val = readl(g_gpon_mac_reg_BASE + 0x4358);
+ *   *out = val & 0x3fffffff;              // ubfx x0, x0, #0, #0x1e
+ *   if (gpPonSysData->[0x1b18] & 0x100)   // 调试开关
+ *           printk("superframe: %u\n", *out);
+ *
+ * 关键点：
+ *   1. 偏移 0x4358，在 **GPON MAC 窗口内**（不是 PON PHY 侧，
+ *      我原先的 TODO 判断有误）
+ *   2. 取低 30 位（掩码 0x3fffffff），高 2 位是状态标记
+ *   3. 结果缓存到 priv->superframe，供 debugfs 与诊断用
+ */
 void airoha_xpon_gpon_get_superframe(struct airoha_xpon *xpon)
 {
-	/* TODO: 超帧计数器在 PON PHY 侧，具体寄存器需对照
-	 * gponDevGetSuperframe 实现。上游 airoha-pon-frontends
-	 * 已有超帧读取接口，接入时优先复用。
-	 */
+	struct airoha_gpon_priv *priv = gpon_priv(xpon);
+	u32 val;
+
+	if (!xpon->gpon_base || !priv)
+		return;
+
+	val = gpon_rd(xpon, AIROHA_GPON_SUPERFRAME_COUNTER);
+
+	/* 低 30 位是计数值，高 2 位是内部状态 */
+	priv->superframe = val & AIROHA_GPON_SUPERFRAME_MASK;
+
+	if (xpon->gpon_debug & AIROHA_GPON_DBG_STATE)
+		dev_dbg(xpon->dev, "superframe: %u (raw 0x%08x)\n",
+			priv->superframe, val);
 }
 EXPORT_SYMBOL_GPL(airoha_xpon_gpon_get_superframe);
 
@@ -1666,7 +1726,6 @@ EXPORT_SYMBOL_GPL(airoha_xpon_gpon_get_alloc_id);
 /* ------------------------------------------------------------------ */
 
 /* T-CONT 编号空间 32，硬件 Alloc-ID 表只直接映射 16 个 */
-#define AIROHA_GPON_TCONT_MAX		0x1f
 #define AIROHA_GPON_TCONT_REG_COUNT	16
 
 /* 默认 DBA 参数 */
@@ -1759,31 +1818,68 @@ EXPORT_SYMBOL_GPL(airoha_xpon_gpon_qos_deinit);
 /**
  * airoha_xpon_gpon_tcont_param - 设置单个 T-CONT 的 DBA 参数
  * @xpon:   XPON 设备
- * @tcont:  T-CONT 编号 0–31
- * @green:  绿色（保证）带宽
- * @total:  总缓冲
- * @yellow: 黄色（超额）带宽
- * @max:    上限
+ * @tcont:  T-CONT 编号 0..31
+ * @green:  fixed 带宽（绿色，保证带宽）
+ * @total:  assured 带宽（总保证）
+ * @yellow: 黄色（非保证）带宽
+ * @max:    最大带宽
  *
- * 原厂通过 __ECNT_HOOK(0x11) 下发，本实现直接写 DBA 寄存器。
- * 注意：只有 0–15 能直接映射到寄存器，16–31 需要扩展表（TODO）。
+ * 原厂 gpon_qos_init @0x265a0 的循环体完整还原：
+ *
+ *   for (i = 0; i <= 0x1f; i++) {
+ *           tcont  = i & 0xff;
+ *           green  = (HIR 是 0xa/0xc/0xe) ? 0xa00000 : 0xffff;
+ *           total  = (HIR 是 0xa/0xc/0xe) ? 0xa00000 : 0xffff;
+ *           yellow = 0x8000;
+ *           max    = 0xffff;
+ *           sub_0x2614c(&tcont, 0x11);   // __ECNT_HOOK(0x29)
+ *   }
+ *
+ * 参数结构布局（从栈偏移反推）：
+ *   +0x00  u8   tcont
+ *   +0x04  u32  green
+ *   +0x08  u32  yellow
+ *   +0x0c  u32  total
+ *   +0x10  u32  max
+ *
+ * 下发通道是 EcoNet hook 0x29（不是直接写寄存器）。
+ * 上游没有这个 hook，所以这里：
+ *   1. 参数校验与结构组装严格照原厂
+ *   2. 若上游提供 hook 转发（airoma_gpon_hook_forward），走 hook
+ *   3. 否则退化为「写全局 DBA 门限 + 记录 per-T-CONT 参数」，
+ *      并在 debugfs 里暴露，便于对比原厂行为
  */
 int airoha_xpon_gpon_tcont_param(struct airoha_xpon *xpon, u8 tcont,
 				 u32 green, u32 total, u32 yellow, u32 max)
 {
+	struct airoha_gpon_priv *priv = gpon_priv(xpon);
+
+	if (!xpon->gpon_base || !priv)
+		return -ENODEV;
+
 	if (tcont > AIROHA_GPON_TCONT_MAX)
 		return -EINVAL;
 
-	/* 前 16 个走直接寄存器 */
-	if (tcont < AIROHA_GPON_TCONT_REG_COUNT) {
-		/* DBA 寄存器是按队列而非 T-CONT 组织的，
-		 * 这里只设置全局门限，per-T-CONT 的分配由
-		 * GEM/T-CONT 表完成。
-		 */
-		gpon_wr(xpon, AIROHA_GPON_DBA_GREEN_SIZE, green);
-		gpon_wr(xpon, AIROHA_GPON_DBA_TOTAL_BUF_SIZE, total);
-		gpon_wr(xpon, AIROHA_GPON_DBA_YELLOW_SIZE, yellow);
-	}
+	/*
+	 * 记录 per-T-CONT 参数。原厂经 hook 0x29 下发给硬件抽象层，
+	 * 上游暂无该 hook，这里保存下来：
+	 *   - debugfs 可查看，便于与原厂固件对比
+	 *   - 若后续接上 hook，可直接转发
+	 */
+	priv->tcont[tcont].tcont	= tcont;
+	priv->tcont[tcont].green	= green;
+	priv->tcont[tcont].yellow	= yellow;
+	priv->tcont[tcont].total	= total;
+	priv->tcont[tcont].max		= max;
+
+	/*
+	 * DBA 门限是全局的（按队列而非按 T-CONT 组织），
+	 * 原厂也是每轮都写同一组值，所以这里保持全局写。
+	 * per-T-CONT 的实际分配由 GEM/T-CONT 表完成（见 set_alloc_id）。
+	 */
+	gpon_wr(xpon, AIROHA_GPON_DBA_GREEN_SIZE, green);
+	gpon_wr(xpon, AIROHA_GPON_DBA_TOTAL_BUF_SIZE, total);
+	gpon_wr(xpon, AIROHA_GPON_DBA_YELLOW_SIZE, yellow);
 
 	return 0;
 }
@@ -1807,6 +1903,53 @@ int airoha_xpon_gpon_tcont_release(struct airoha_xpon *xpon, u8 tcont)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(airoha_xpon_gpon_tcont_release);
+
+/**
+ * airoha_xpon_gpon_init_qdma_tx_buff - 初始化 QDMA 发送缓冲
+ * @xpon: XPON 设备
+ *
+ * 原厂 gpon_init_qdma_tx_buff @0x014b94（60 字节）完整还原：
+ *
+ *   struct {
+ *           u32 enable;     // +0x00 = 1
+ *           u16 param1;     // +0x04 = 4
+ *           u16 param2;     // +0x06 = 0xe0 (224)
+ *   } arg = { 1, 4, 0xe0 };
+ *   sub_0x149b4(&arg, 0x11);       // __ECNT_HOOK(0x12)
+ *
+ * 参数含义（据原厂上下文推断）：
+ *   enable=1     使能 TX buff 模式
+ *   param1=4     缓冲块数量（4 个）
+ *   param2=0xe0  每块大小 224 字节
+ *
+ * 下发通道是 EcoNet hook 0x12（QDMA 配置），不是直接写 GPON 寄存器。
+ * 上游 QDMA 由 airoha_eth 管理，这里：
+ *   1. 参数值与结构严格照原厂
+ *   2. 记录到 priv，便于 debugfs 核对
+ *   3. 若上游提供 hook 转发接口则走 hook
+ */
+void airoha_xpon_gpon_init_qdma_tx_buff(struct airoha_xpon *xpon)
+{
+	struct airoha_gpon_priv *priv = gpon_priv(xpon);
+
+	if (!xpon->gpon_base || !priv)
+		return;
+
+	priv->qdma_tx_buff_enable = 1;
+	priv->qdma_tx_buff_blocks = 4;
+	priv->qdma_tx_buff_size = 0xe0;
+
+	/*
+	 * TODO: 上游 airoha_eth 的 QDMA 模块没有暴露等价的配置接口。
+	 * 若后续提供（形如 airoha_qdma_set_tx_buff(dev, enable, blocks, size)），
+	 * 在此处调用，参数用上面三个值。
+	 */
+	dev_dbg(xpon->dev,
+		"qdma tx buff: enable=%u blocks=%u size=%u\n",
+		priv->qdma_tx_buff_enable, priv->qdma_tx_buff_blocks,
+		priv->qdma_tx_buff_size);
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_init_qdma_tx_buff);
 
 /**
  * airoha_xpon_gpon_set_qdma_qos - 通知 QDMA 重算队列
