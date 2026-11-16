@@ -5847,10 +5847,28 @@ index 318aa58..1a336c1 100644
  	{
  		.mode = AIROHA_XPON_MODE_XGPON,
 diff --git a/airoha-xpon/src/airoha-xpon-private.h b/airoha-xpon/src/airoha-xpon-private.h
-index ef8b0bb..54b4956 100644
+index ef8b0bb..513fcb3 100644
 --- a/airoha-xpon/src/airoha-xpon-private.h
 +++ b/airoha-xpon/src/airoha-xpon-private.h
-@@ -251,6 +251,8 @@ struct airoha_xpon {
+@@ -247,10 +247,26 @@ struct airoha_xpon_data_path_state {
+ 	bool configured;
+ };
+ 
++/*
++ * GPON MIB 计数器。中断处理里只做自增，统计查询时整体读出，
++ * 避免每次中断都去读寄存器。
++ */
++struct airoha_gpon_mib {
++	u32 rx_fs_err;		/* 帧同步丢失 / 下行头错误 */
++	u32 tx_burst_err;	/* 上行突发错误 / FEC */
++	u32 bwmap_loss;		/* BWmap 溢出 / Grant 丢失 */
++	u32 rx_gtc;		/* 下行 GTC 帧计数 */
++	u32 rx_gem;		/* 下行 GEM 帧计数 */
++	u32 tx_gem;		/* 上行 GEM 帧计数 */
++	u32 rx_crc_err;		/* 下行 CRC 错误 */
++};
++
+ struct airoha_xpon {
  	struct device *dev;
  	struct dentry *debug_dir;
  	void __iomem *xgpon_base;
@@ -5859,7 +5877,7 @@ index ef8b0bb..54b4956 100644
  	void __iomem *epon_base;
  	void __iomem *pon_phy_base;
  	struct regmap *scu;
-@@ -314,6 +316,21 @@ struct airoha_xpon {
+@@ -314,6 +330,24 @@ struct airoha_xpon {
  	bool service_ready;
  	bool stopping;
  	bool active_mode_valid;
@@ -5872,6 +5890,9 @@ index ef8b0bb..54b4956 100644
 +	bool gpon_link_setup;
 +	bool gpon_ploam_ready;
 +	bool gpon_dying;
++	bool gpon_dying_allowed;	/* 允许发 Dying Gasp */
++	u32 gpon_dying_delay_us;	/* Dying Gasp 前延时 */
++	struct airoha_gpon_mib mib;	/* MIB 计数器 */
 +	u16 gpon_onu_id;
 +	u32 gpon_debug;
 +	u32 gpon_bwm_stop_cfg;
