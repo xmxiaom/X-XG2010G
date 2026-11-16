@@ -111,11 +111,22 @@ static void epon_hw_apply_table(struct airoha_xpon *xpon,
  * airoha_epon_hw_init - 应用原厂完整的 MAC 初始化序列
  * @xpon: XPON 设备
  *
- * 上游 start_mac 只配了约 15 个寄存器，本函数补上原厂 112 条 MAC 表。
- * 调用时机：在 start_mac 完成 SCU 复位释放之后、使能中断之前。
+ * 上游 start_mac 只配了约 20 个寄存器，本函数补上原厂 112 + 127 条表。
  *
- * 注意：本函数只写寄存器，不碰中断使能与 SCU 复位——
- * 那两块上游已经做了，重复做会打乱时序。
+ * 调用时机（经原厂反汇编核实，见 docs/22）：
+ *
+ *   原厂 eponMacSwReset @0x317a0 的顺序是：
+ *     1. RSTCTRL1 bit31 置位 → udelay → 清零      （复位脉冲）
+ *     2. 之后才写 0x6000 / 0x6100 / 0x60d0 等寄存器
+ *
+ *   即「先释放复位，再写寄存器」。我最初假设的「复位期间锁存」是错的。
+ *
+ *   上游 start_mac 比原厂多一层保护：RSTCTRL1 释放后、SSR3 逻辑复位
+ *   释放前留了一个窗口。本函数应插在这个窗口里（比原厂更保守）。
+ *
+ * 注意：本函数只写 0x004–0x240 区间的静态配置寄存器，
+ * 不碰 0x07c（LLID 注册控制）和 0x5f0–0x5f8（PHY 中断）——
+ * 那些是运行时寄存器，原厂也没放在初始化表里（docs/22 第 2.3 节）。
  */
 int airoha_epon_hw_init(struct airoha_xpon *xpon)
 {

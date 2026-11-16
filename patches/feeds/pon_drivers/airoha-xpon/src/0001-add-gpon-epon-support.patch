@@ -11,10 +11,10 @@ index 44479aa..5a72e8b 100644
 +	airoha-xpon-proto.o airoha-xpon-gpon.o airoha-xpon-epon-hw.o
 diff --git a/airoha-xpon/src/airoha-xpon-epon-hw.c b/airoha-xpon/src/airoha-xpon-epon-hw.c
 new file mode 100644
-index 0000000..fe2cc5d
+index 0000000..8693271
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-epon-hw.c
-@@ -0,0 +1,276 @@
+@@ -0,0 +1,287 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 EPON —— 原厂寄存器初始化序列 + 协议操作表
@@ -128,11 +128,22 @@ index 0000000..fe2cc5d
 + * airoha_epon_hw_init - 应用原厂完整的 MAC 初始化序列
 + * @xpon: XPON 设备
 + *
-+ * 上游 start_mac 只配了约 15 个寄存器，本函数补上原厂 112 条 MAC 表。
-+ * 调用时机：在 start_mac 完成 SCU 复位释放之后、使能中断之前。
++ * 上游 start_mac 只配了约 20 个寄存器，本函数补上原厂 112 + 127 条表。
 + *
-+ * 注意：本函数只写寄存器，不碰中断使能与 SCU 复位——
-+ * 那两块上游已经做了，重复做会打乱时序。
++ * 调用时机（经原厂反汇编核实，见 docs/22）：
++ *
++ *   原厂 eponMacSwReset @0x317a0 的顺序是：
++ *     1. RSTCTRL1 bit31 置位 → udelay → 清零      （复位脉冲）
++ *     2. 之后才写 0x6000 / 0x6100 / 0x60d0 等寄存器
++ *
++ *   即「先释放复位，再写寄存器」。我最初假设的「复位期间锁存」是错的。
++ *
++ *   上游 start_mac 比原厂多一层保护：RSTCTRL1 释放后、SSR3 逻辑复位
++ *   释放前留了一个窗口。本函数应插在这个窗口里（比原厂更保守）。
++ *
++ * 注意：本函数只写 0x004–0x240 区间的静态配置寄存器，
++ * 不碰 0x07c（LLID 注册控制）和 0x5f0–0x5f8（PHY 中断）——
++ * 那些是运行时寄存器，原厂也没放在初始化表里（docs/22 第 2.3 节）。
 + */
 +int airoha_epon_hw_init(struct airoha_xpon *xpon)
 +{
@@ -839,21 +850,26 @@ index 0000000..1919369
 +
 +#endif /* _AIROHA_XPON_EPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-epon.c b/airoha-xpon/src/airoha-xpon-epon.c
-index 0a2ff9f..ae32bb1 100644
+index 0a2ff9f..dfc6665 100644
 --- a/airoha-xpon/src/airoha-xpon-epon.c
 +++ b/airoha-xpon/src/airoha-xpon-epon.c
-@@ -418,6 +418,19 @@ static int airoha_xpon_epon_start_mac(struct airoha_xpon *xpon)
+@@ -418,6 +418,24 @@ static int airoha_xpon_epon_start_mac(struct airoha_xpon *xpon)
  	airoha_epon_write(xpon, AIROHA_EPON_TX_FETCH_CFG, 0x002a03e8);
  	xpon->epon.sync_time = AIROHA_EPON_SYNC_TIME_DEFAULT;
  
 +	/*
 +	 * 原厂完整初始化序列（349 条 / 5 张表）。
-+	 * 上游此前只写了上面 3 个寄存器，其余 300+ 个保持上电默认值；
-+	 * 原厂 xpon.ko 有完整的 eponMacTableInit + eponRegDefValTableInit，
-+	 * 这里补上，确保与 naoki66 固件行为一致。
 +	 *
-+	 * 必须在逻辑复位释放之前应用：表里有若干寄存器属于
-+	 * 「复位期间锁存」类型，释放后再写不生效。
++	 * 上游此前只写了上面 3 个寄存器，其余 300+ 个保持上电默认值；
++	 * 原厂 xpon.ko 有完整的 eponMacTableInit + eponRegDefValTableInit。
++	 *
++	 * 插入点说明（经原厂反汇编核实，见 docs/22）：
++	 *   原厂 eponMacSwReset 是「先释放复位、再写寄存器」，
++	 *   所以这里放在 RSTCTRL1 已释放、SSR3 逻辑复位仍持有的窗口内，
++	 *   比原厂更保守，避免复位释放瞬间的寄存器状态竞争。
++	 *
++	 * 只覆盖 0x004–0x240 的静态配置；0x07c（LLID 注册）与
++	 * 0x5f0–0x5f8（PHY 中断）属运行时寄存器，仍由后续代码写入。
 +	 */
 +	ret = airoha_epon_hw_init(xpon);
 +	if (ret)
@@ -862,11 +878,72 @@ index 0a2ff9f..ae32bb1 100644
  	/* PHY readiness gates EPON MAC logic reset release. */
  	regmap_clear_bits(xpon->scu, AIROHA_SCU_SSR3,
  	                  AIROHA_SCU_EPON_LOGIC_RESET);
+@@ -495,6 +513,60 @@ static int airoha_xpon_epon_start_mac(struct airoha_xpon *xpon)
+ 	return 0;
+ }
+ 
++/*
++ * 对应原厂 eponMacRestart（@0x31a80，260B）。
++ *
++ * 原厂调用链（从 xpon.ko 符号表追踪，见 docs/22 第 3 节）：
++ *   eponSetPonMacAddr            → eponMacRestart
++ *   eponWanResetWithChannelRetire → eponMacRestart
++ *   eponMacRestart → eponMacSwReset → xmcs_remove_llid
++ *                  → eponHwDygaspCtrl → eponTxOamFavorModeCtl
++ *                  → eponSnifferModeCtrl
++ *
++ * 注意 eponMacSwReset 只在「停止 / 重启」路径，不在启动路径：
++ *   xpondrv_init → eponInit → eponStart   （启动，不碰 SwReset）
++ *
++ * 所以本函数不能塞进 start_rx，必须作为独立的重启路径，
++ * 在改 MAC 地址或 WAN 重置之后调用。
++ */
++int airoha_xpon_epon_restart_mac(struct airoha_xpon *xpon)
++{
++	int ret;
++
++	if (!xpon->epon_base)
++		return -ENODEV;
++
++	/*
++	 * 1. 软复位：清运行时状态（中断状态、队列计数、错误计数器），
++	 *    保留 MAC 地址、TRX 校准、中断使能等关键配置。
++	 *    对应原厂 eponMacSwReset 的寄存器重配部分。
++	 */
++	ret = airoha_epon_hw_soft_reset(xpon);
++	if (ret)
++		return ret;
++
++	/*
++	 * 2. 清 LLID 注册状态（原厂 xmcs_remove_llid）。
++	 *    重启后必须重新走 MPCP 发现流程。
++	 */
++	airoha_xpon_epon_reset_registration(xpon);
++
++	/*
++	 * 3. 重新启动 MAC（含完整初始化表 + SCU 复位序列）。
++	 *    这一步会重新应用 349 条表并重新 program_mac。
++	 */
++	ret = airoha_xpon_epon_start_mac(xpon);
++	if (ret) {
++		xpon->last_start_error = ret;
++		return ret;
++	}
++
++	dev_info(xpon->dev, "EPON MAC restarted (MAC address change or WAN reset)\n");
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_epon_restart_mac);
++
+ static int airoha_xpon_epon_start_1g_rx(struct airoha_xpon *xpon, bool retrain)
+ {
+ 	int ret;
 diff --git a/airoha-xpon/src/airoha-xpon-epon.h b/airoha-xpon/src/airoha-xpon-epon.h
-index 71414bc..df3a30d 100644
+index 71414bc..c7d0b2f 100644
 --- a/airoha-xpon/src/airoha-xpon-epon.h
 +++ b/airoha-xpon/src/airoha-xpon-epon.h
-@@ -23,4 +23,13 @@ int airoha_xpon_epon_advance(struct airoha_xpon *xpon, u32 phy_events,
+@@ -23,4 +23,16 @@ int airoha_xpon_epon_advance(struct airoha_xpon *xpon, u32 phy_events,
  irqreturn_t airoha_xpon_epon_irq_fast(struct airoha_xpon *xpon);
  irqreturn_t airoha_xpon_epon_irq(struct airoha_xpon *xpon);
  irqreturn_t airoha_xpon_epon_phy_irq(struct airoha_xpon *xpon);
@@ -875,6 +952,9 @@ index 71414bc..df3a30d 100644
 + * 原厂完整寄存器初始化序列（349 条 / 5 张表）。
 + * 实现在 airoha-xpon-epon-hw.c，数据来自 airoha-xpon-epon-regs.h。
 + */
++/* 重启 MAC（对应原厂 eponMacRestart，改 MAC / WAN 重置时用） */
++int airoha_xpon_epon_restart_mac(struct airoha_xpon *xpon);
++
 +int airoha_epon_hw_init(struct airoha_xpon *xpon);
 +int airoha_epon_hw_soft_reset(struct airoha_xpon *xpon);
 +int airoha_epon_hw_logic_reset(struct airoha_xpon *xpon);
