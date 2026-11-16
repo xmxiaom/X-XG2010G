@@ -44,6 +44,14 @@ jobs:
           cp 2010.config .config
           make defconfig
 
+      - name: Build host tools first
+        run: |
+          # OpenWrt 的 tools/ 阶段会构建 libdeflate-gzip 等 host 工具。
+          # 直接 compile 某个包会跳过这一步，导致解压源码时
+          # 找不到 staging_dir/host/bin/libdeflate-gzip（第 1 次失败原因）。
+          set -o pipefail
+          make tools/install -j$(nproc) BUILD_LOG=1 2>&1 | tail -20
+
       - name: Download only PON deps
         run: |
           make package/feeds/pon_drivers/airoha-xpon/download V=s -j1 2>&1 | tail -30
