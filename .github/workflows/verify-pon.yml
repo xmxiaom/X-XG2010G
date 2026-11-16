@@ -1,0 +1,71 @@
+name: Verify PON Module
+
+# 只编译 airoha-xpon 模块，用于验证 GPON/EPON 代码正确性。
+# 与 build-firmware.yml 分开，避免被 airoha-voice / xray-core
+# 等无关包的下载失败阻塞。
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'patches/feeds/pon_drivers/**'
+      - '.github/workflows/verify-pon.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup build environment
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential clang gcc g++ binutils bzip2 gawk \
+            gettext git libncurses-dev libssl-dev python3 python3-setuptools \
+            rsync unzip wget xsltproc zlib1g-dev file which perl sed make
+
+      - name: Install feeds
+        run: |
+          find scripts -type f -exec chmod +x {} + 2>/dev/null || true
+          find . -maxdepth 3 -name '*.sh' -exec chmod +x {} + 2>/dev/null || true
+          chmod +x ./scripts/feeds
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          bash scripts/fix-stale-golang-host.sh
+
+      - name: Select feed providers
+        run: FEED_PATCHES_STRICT=1 bash scripts/select-feed-providers.sh
+
+      - name: Apply feed patches
+        run: bash scripts/apply-feed-patches.sh
+
+      - name: Configure
+        run: |
+          cp 2010.config .config
+          make defconfig
+
+      - name: Download only PON deps
+        run: |
+          make package/feeds/pon_drivers/airoha-xpon/download V=s -j1 2>&1 | tail -30
+
+      - name: Compile airoha-xpon
+        run: |
+          set -o pipefail
+          make package/feeds/pon_drivers/airoha-xpon/compile \
+            BUILD_LOG=1 V=s -j1 2>&1 | tee pon-build.log
+        continue-on-error: false
+
+      - name: Show build log on failure
+        if: failure()
+        run: |
+          echo "=== errors ==="
+          grep -nE "error:|Error [0-9]|warning:|No rule" pon-build.log | head -60 || true
+          echo "=== last 100 lines ==="
+          tail -100 pon-build.log
+
+      - name: Verify artifacts
+        if: success()
+        run: |
+          echo "=== built kmod ==="
+          find bin -name '*airoha-xpon*' -o -name '*.ko' 2>/dev/null | grep -i xpon || true
+          find build_dir -name 'airoha-xpon*.ko' 2>/dev/null | head -5
