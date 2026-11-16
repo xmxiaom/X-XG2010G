@@ -69,27 +69,28 @@ jobs:
           # airoha-pon-frontends 的 Makefile 依赖内核 .config：
           #   make[2]: *** No rule to make target '.../linux-6.18.60/.config',
           #            needed by '.../airoha-pon-frontends/.built'
-          # 第 9 次验证卡在这里（与 PON 代码无关，是构建顺序问题）。
           #
-          # 注意：target/linux/compile 会编整个内核（很慢且容易失败），
-          # 我们只需要 .config 文件本身。用 prepare 目标生成即可。
-          set -o pipefail
-          make defconfig BUILD_LOG=1 2>&1 | tail -5 || true
-          make target/linux/prepare BUILD_LOG=1 2>&1 | tail -10 || true
+          # 本步骤必须全程容错：第 12 次验证时，KCONF=$(ls ...) 在 set -e
+          # 下因 ls 返回 2 而让整步以 exit 2 结束，看起来像内核配置失败，
+          # 实际是 shell 严格模式的问题。所以这里显式 set +e 并以 exit 0 结束。
+          set +e
+          make defconfig BUILD_LOG=1 >/dev/null 2>&1
+          echo "defconfig rc=$?"
+
+          make download -j8 BUILD_LOG=1 >/dev/null 2>&1
+          echo "download rc=$?"
+
+          make target/linux/prepare BUILD_LOG=1 >/dev/null 2>&1
+          echo "target/linux/prepare rc=$?"
 
           KCONF=$(ls build_dir/target-*/linux-*/.config 2>/dev/null | head -1)
           if [ -n "$KCONF" ]; then
-            echo "✅ 内核配置已生成: $KCONF"
+            echo "ok: kernel .config at $KCONF"
           else
-            echo "⚠️ prepare 未生成 .config，尝试直接构造"
-            mkdir -p "$(dirname "$(ls -d build_dir/target-*/linux-* 2>/dev/null | head -1)")" 2>/dev/null || true
-            KLINUX=$(ls -d build_dir/target-*/linux-* 2>/dev/null | head -1)
-            if [ -n "$KLINUX" ]; then
-              cp .config "$KLINUX/.config" 2>/dev/null || true
-              echo "  已复制顶层 .config 到 $KLINUX/.config"
-            fi
+            echo "warn: kernel .config missing, build_dir:"
+            ls -d build_dir/target-*/linux-* 2>/dev/null || echo "  (no kernel dir)"
           fi
-          ls -la build_dir/target-*/linux-*/.config 2>/dev/null || echo "(.config 仍不存在)"
+          exit 0
 
       - name: Compile airoha-xpon
         run: |
@@ -101,10 +102,19 @@ jobs:
       - name: Show build log on failure
         if: failure()
         run: |
-          echo "=== errors ==="
-          grep -nE "error:|Error [0-9]|warning:|No rule" pon-build.log | head -60 || true
-          echo "=== last 100 lines ==="
-          tail -100 pon-build.log
+          set +e
+          if [ -f pon-build.log ]; then
+            echo "=== errors ==="
+            grep -nE "error:|Error [0-9]|warning:|No rule" pon-build.log | head -60
+            echo "=== last 100 lines ==="
+            tail -100 pon-build.log
+          else
+            echo "pon-build.log 不存在（编译步骤未执行到）"
+            echo "=== 最近的 make 日志 ==="
+            ls -t logs/*.txt 2>/dev/null | head -3
+            tail -60 "$(ls -t logs/*.txt 2>/dev/null | head -1)" 2>/dev/null
+          fi
+          exit 0
 
       - name: Verify artifacts
         if: success()
