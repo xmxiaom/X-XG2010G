@@ -76,8 +76,8 @@ def value_before(ins, idx):
             if p.operands[1].type != ARM64_OP_IMM:
                 continue
             v = p.operands[1].imm & 0xFFFFFFFF
-            # 向前合并 movk
-            for k in range(j - 1, max(j - 6, -1), -1):
+            # movk 在 mov 之后，须向后找（原先向前找导致高 16 位丢失）
+            for k in range(j + 1, min(j + 6, len(ins))):
                 q = ins[k]
                 if q.mnemonic != "movk":
                     continue
