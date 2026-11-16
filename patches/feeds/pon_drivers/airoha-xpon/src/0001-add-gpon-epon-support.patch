@@ -1108,10 +1108,10 @@ index 0000000..259cd8c
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..45a8e1c
+index 0000000..3f86754
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,2523 @@
+@@ -0,0 +1,2602 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1369,6 +1369,8 @@ index 0000000..45a8e1c
 +	u32			qdma_tx_buff_enable;	/* +0x00 = 1 */
 +	u32			qdma_tx_buff_blocks;	/* +0x04 = 4 */
 +	u32			qdma_tx_buff_size;	/* +0x06 = 0xe0 */
++	/* GPON AES-128 加密密钥（原厂 gponDevSetEncryptKey，16 字节） */
++	u8			aes_key[16];
 +	s32			hw_param_cache;		/* +0x24c，初值 -1 */
 +};
 +
@@ -1400,6 +1402,8 @@ index 0000000..45a8e1c
 +int airoha_xpon_gpon_tcont_release(struct airoha_xpon *xpon, u8 tcont);
 +void airoha_xpon_gpon_set_qdma_qos(struct airoha_xpon *xpon, bool reset);
 +void airoha_xpon_gpon_init_qdma_tx_buff(struct airoha_xpon *xpon);
++void airoha_xpon_gpon_set_encrypt_key(struct airoha_xpon *xpon,
++				      const u8 key[16]);
 +int airoha_xpon_gpon_backup_gem(struct airoha_xpon *xpon,
 +				const struct airoha_gpon_recovery_gem *e);
 +int airoha_xpon_gpon_check_gem_exist(struct airoha_xpon *xpon, u16 gem_id);
@@ -3019,6 +3023,70 @@ index 0000000..45a8e1c
 +EXPORT_SYMBOL_GPL(airoha_xpon_gpon_tcont_release);
 +
 +/**
++ * airoha_xpon_gpon_set_encrypt_key - 写入 GPON AES 加密密钥
++ * @xpon: XPON 设备
++ * @key:  16 字节 AES-128 密钥
++ *
++ * 原厂 gponDevSetEncryptKey @0x023ce8（484 字节）完整还原：
++ *
++ *   1. 按大端把 16 字节拼成 4 个 u32：
++ *        w0 = key[0]<<24 | key[1]<<16 | key[2]<<8 | key[3]
++ *        w1 = key[4..7]
++ *        w2 = key[8..11]
++ *        w3 = key[12..15]
++ *   2. 写入 4 个 shadow 寄存器，注意顺序是反的：
++ *        0x4074 <- w3   (AIROHA_GPON_AES_KEY_SHADOW_REGISTER0)
++ *        0x4078 <- w2   (REGISTER1)
++ *        0x407c <- w1   (REGISTER2)
++ *        0x4080 <- w0   (REGISTER3)
++ *
++ * 调用时机：原厂 gpon_enable 的最后一步（在 SetSerialNumber 之后）。
++ * 密钥来源是 OMCI 下发的 MIB 或身份层的预置值。
++ *
++ * 注意：全零密钥会被跳过——原厂用全零表示「未配置」，写入全零会让
++ * 硬件进入异常加密态，导致下行数据无法解密。
++ */
++void airoha_xpon_gpon_set_encrypt_key(struct airoha_xpon *xpon,
++				      const u8 key[16])
++{
++	u32 w0, w1, w2, w3;
++	bool all_zero = true;
++	int i;
++
++	if (!xpon->gpon_base || !key)
++		return;
++
++	for (i = 0; i < 16; i++) {
++		if (key[i]) {
++			all_zero = false;
++			break;
++		}
++	}
++	if (all_zero) {
++		dev_dbg(xpon->dev, "encrypt key not configured, skip\n");
++		return;
++	}
++
++	w0 = ((u32)key[0] << 24) | ((u32)key[1] << 16) |
++	     ((u32)key[2] << 8)  |  (u32)key[3];
++	w1 = ((u32)key[4] << 24) | ((u32)key[5] << 16) |
++	     ((u32)key[6] << 8)  |  (u32)key[7];
++	w2 = ((u32)key[8] << 24) | ((u32)key[9] << 16) |
++	     ((u32)key[10] << 8) |  (u32)key[11];
++	w3 = ((u32)key[12] << 24) | ((u32)key[13] << 16) |
++	     ((u32)key[14] << 8)  |  (u32)key[15];
++
++	/* 顺序照原厂：低地址存高 32 位（大端语义） */
++	gpon_wr(xpon, AIROHA_GPON_AES_KEY_SHADOW_REGISTER0, w3);
++	gpon_wr(xpon, AIROHA_GPON_AES_KEY_SHADOW_REGISTER1, w2);
++	gpon_wr(xpon, AIROHA_GPON_AES_KEY_SHADOW_REGISTER2, w1);
++	gpon_wr(xpon, AIROHA_GPON_AES_KEY_SHADOW_REGISTER3, w0);
++
++	dev_dbg(xpon->dev, "encrypt key programmed\n");
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_encrypt_key);
++
++/**
 + * airoha_xpon_gpon_init_qdma_tx_buff - 初始化 QDMA 发送缓冲
 + * @xpon: XPON 设备
 + *
@@ -3407,11 +3475,22 @@ index 0000000..45a8e1c
 +	if (ret)
 +		return ret;
 +
-+	/* 7-8. SN 与密钥由 identity 层在 start_rx 前写好，
-+	 * 这里只确认已写入
++	/*
++	 * 5. SN 确认（原厂 gponDevSetSerialNumber 在 enable 内调用）
++	 * 上游由 identity 层在 start_rx 前写好，这里只校验。
 +	 */
 +	if (!priv->vssn[0] && !priv->vssn[1])
 +		dev_warn(xpon->dev, "serial number not programmed yet\n");
++
++	/*
++	 * 6. AES 加密密钥（原厂 gponDevSetEncryptKey，enable 的最后一步）
++	 *
++	 * 密钥来源优先级：
++	 *   1. OMCI 下发的 MIB（上游 omci 层）
++	 *   2. 身份层预置值
++	 * 两者都未就绪时传全零，函数内部会跳过。
++	 */
++	airoha_xpon_gpon_set_encrypt_key(xpon, priv->aes_key);
 +
 +	return 0;
 +}
