@@ -1,5 +1,5 @@
 diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
-index 19e9dfc..d8d580c 100644
+index 42e5591..1dc3b69 100644
 --- a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
 +++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
 @@ -159,13 +159,9 @@ return view.extend({
@@ -20,7 +20,7 @@ index 19e9dfc..d8d580c 100644
  		o.value('xgspon', _('XGS-PON 10G/10G'));
  		o.value('epon-10g-1g', _('10G-EPON 10G/1G'));
 diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
-index 3638c7b..61c1e63 100644
+index f1b0c1a..279e1aa 100644
 --- a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
 +++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
 @@ -499,13 +499,9 @@ return view.extend({

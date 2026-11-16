@@ -1,7 +1,7 @@
-diff --git a/src/src/netlink.rs b/src/src/netlink.rs
+diff --git a/airoha-ponctl/src/src/netlink.rs b/airoha-ponctl/src/src/netlink.rs
 index bfc23e3..fc5f10e 100644
---- a/src/src/netlink.rs
-+++ b/src/src/netlink.rs
+--- a/airoha-ponctl/src/src/netlink.rs
++++ b/airoha-ponctl/src/src/netlink.rs
 @@ -62,13 +62,13 @@ pub enum LineMode {
  impl LineMode {
      /// Parse a line-mode name the CLI accepts.
