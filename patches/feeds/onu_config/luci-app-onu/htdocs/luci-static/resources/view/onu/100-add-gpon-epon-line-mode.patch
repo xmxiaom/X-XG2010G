@@ -1,56 +1,24 @@
 diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
-index 42e5591..3430881 100644
 --- a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
 +++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
-@@ -159,13 +159,9 @@ return view.extend({
- 		o.description = _('ONU class reported to the OLT in the capability ME: 0 SFU, 1 HGU (default), 2 SBU.');
- 
- 		o = s.option(form.ListValue, 'mode', _('Line mode'));
--		o.default = 'xgpon';
--		o.rmempty = false;
--		/*
--		 * GPON 2.5G/1.25G and EPON 1G/1G are masked out of this build: only the
--		 * 10G line modes are offered. Both values stay valid in the daemons, so a
--		 * board configured with either one still runs.
--		 */
-+		o.default = 'gpon';
-+		o.value('gpon', _('GPON 2.5G/1.25G'));
+@@ -166,6 +166,8 @@
+ 		 * 10G line modes are offered. Both values stay valid in the daemons, so a
+ 		 * board configured with either one still runs.
+ 		 */
++		o.value('gpon', _('GPON'));
 +		o.value('epon-1g', _('EPON'));
  		o.value('xgpon', _('XG-PON 10G/2.5G'));
  		o.value('xgspon', _('XGS-PON 10G/10G'));
  		o.value('epon-10g-1g', _('10G-EPON 10G/1G'));
 diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
-index f1b0c1a..02c8108 100644
 --- a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
 +++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
-@@ -499,13 +499,9 @@ return view.extend({
- 		s.addremove = false;
- 
- 		o = s.option(form.ListValue, 'mode', _('Line mode'));
--		o.default = 'xgpon';
--		o.rmempty = false;
--		/*
--		 * GPON 2.5G/1.25G and EPON 1G/1G are masked out of this build: only the
--		 * 10G line modes are offered. Both values stay valid in the daemons, so a
--		 * board configured with either one still runs.
--		 */
-+		o.default = 'gpon';
-+		o.value('gpon', _('GPON 2.5G/1.25G'));
+@@ -506,6 +506,8 @@
+ 		 * 10G line modes are offered. Both values stay valid in the daemons, so a
+ 		 * board configured with either one still runs.
+ 		 */
++		o.value('gpon', _('GPON'));
 +		o.value('epon-1g', _('EPON'));
  		o.value('xgpon', _('XG-PON 10G/2.5G'));
  		o.value('xgspon', _('XGS-PON 10G/10G'));
  		o.value('epon-10g-1g', _('10G-EPON 10G/1G'));
-diff --git a/luci-app-onu/po/zh_Hans/onu.po b/luci-app-onu/po/zh_Hans/onu.po
-index c44526e..c15d5f9 100644
---- a/luci-app-onu/po/zh_Hans/onu.po
-+++ b/luci-app-onu/po/zh_Hans/onu.po
-@@ -337,6 +337,9 @@ msgstr "XG-PON 10G/2.5G"
- msgid "XGS-PON 10G/10G"
- msgstr "XGS-PON 10G/10G"
- 
-+msgid "EPON"
-+msgstr "EPON"
-+
- msgid "EPON 1G/1G"
- msgstr "EPON 1G/1G"
- 
