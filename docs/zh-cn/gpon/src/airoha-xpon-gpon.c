@@ -1238,11 +1238,16 @@ EXPORT_SYMBOL_GPL(airoha_xpon_gpon_apply_cfg);
  *
  * 原厂 GET_SCU_RSTCTRL1 / SET_SCU_RSTCTRL1。
  * SCU 是系统控制单元，复位控制寄存器管 PON MAC 子系统的硬复位。
+ *
+ * 上游已通过 regmap 暴露 SCU（xpon->scu），寄存器偏移 0x834，
+ * PON MAC 复位位是 bit31（见 airoha-xpon-epon.c:153-154）。
  */
 static void airoha_xpon_scu_rstctrl1_set(struct airoha_xpon *xpon, u32 bits)
 {
-	/* TODO: 上游通过 xpon->scu（regmap）访问 */
-	dev_dbg(xpon->dev, "SCU RSTCTRL1 |= 0x%x\n", bits);
+	if (!xpon->scu)
+		return;
+
+	regmap_set_bits(xpon->scu, AIROHA_GPON_SCU_RSTCTRL1, bits);
 }
 
 /**
@@ -1250,7 +1255,10 @@ static void airoha_xpon_scu_rstctrl1_set(struct airoha_xpon *xpon, u32 bits)
  */
 static void airoha_xpon_scu_rstctrl1_clear(struct airoha_xpon *xpon, u32 bits)
 {
-	dev_dbg(xpon->dev, "SCU RSTCTRL1 &= ~0x%x\n", bits);
+	if (!xpon->scu)
+		return;
+
+	regmap_clear_bits(xpon->scu, AIROHA_GPON_SCU_RSTCTRL1, bits);
 }
 
 /**
@@ -1300,6 +1308,7 @@ EXPORT_SYMBOL_GPL(airoha_xpon_gpon_get_hw_param);
 int airoha_xpon_gpon_start_rx(struct airoha_xpon *xpon)
 {
 	struct airoha_gpon_priv *priv = gpon_priv(xpon);
+	int ret;
 
 	if (!xpon->gpon_base || !priv)
 		return -ENODEV;
@@ -1308,12 +1317,19 @@ int airoha_xpon_gpon_start_rx(struct airoha_xpon *xpon)
 	gpon_wr(xpon, AIROHA_GPON_GPON_MAC_INTERRUPTS_ENABLE, 0);
 	gpon_wr(xpon, AIROHA_GPON_GPON_MAC_INTERRUPTS_STATUS, 0xffffffff);
 
-	/* TODO: 参照 gpon_enable 补全初始化顺序：
-	 *   1. ONU_GLOBAL_CONFIGURATION_REGISTER 复位释放
-	 *   2. GEM TABLE INITIALIZATION CONTROL 置位
-	 *   3. O3/O4 US PLOAM CONTROL 配置
-	 *   4. 使能中断
+	/*
+	 * MAC 初始化：复用 airoha_xpon_gpon_enable()，它已实现完整序列
+	 * （状态门禁 → 通知上层 → 软复位 → dev_init → qos_init → 注册中断）。
+	 *
+	 * 注意 enable 有状态门禁：只接受 O1/O2/O7。首次启动时 priv->state
+	 * 初值为 O1，可以过；若是从 O5 掉线恢复，应先走 detect_los_lof
+	 * 把状态退回 O1，不能直接调 start_rx。
 	 */
+	ret = airoha_xpon_gpon_enable(xpon);
+	if (ret) {
+		dev_err(xpon->dev, "gpon enable failed: %d\n", ret);
+		return ret;
+	}
 
 	airoha_xpon_gpon_set_state(xpon, AIROHA_GPON_O1_INITIAL);
 	airoha_xpon_gpon_ploam_init(xpon);
@@ -1421,6 +1437,33 @@ irqreturn_t airoha_xpon_gpon_isr(struct airoha_xpon *xpon)
 	return IRQ_HANDLED;
 }
 EXPORT_SYMBOL_GPL(airoha_xpon_gpon_isr);
+
+/**
+ * airoha_xpon_gpon_mask_irqs - 屏蔽 GPON MAC 全部中断
+ * @xpon: XPON 设备
+ *
+ * 对应原厂 gpon_disable / gponDetectPhyLosHandler 里
+ * 「写 0 到 INTERRUPTS_ENABLE」的动作。
+ *
+ * 用于：
+ *   - prepare 阶段（启动前先静默，避免旧中断误触发）
+ *   - stop_rx（停接收时）
+ *   - LOS 处理（检测到掉线后先关中断再重建）
+ *
+ * 注意：只清使能位，不清状态位——状态位留着让 isr 读走，
+ * 否则会丢掉「掉线瞬间的最后一个事件」。
+ */
+void airoha_xpon_gpon_mask_irqs(struct airoha_xpon *xpon)
+{
+	if (!xpon->gpon_base)
+		return;
+
+	gpon_wr(xpon, AIROHA_GPON_GPON_MAC_INTERRUPTS_ENABLE, 0);
+
+	if (xpon->gpon_debug & AIROHA_GPON_DBG_IRQ)
+		dev_dbg(xpon->dev, "gpon irqs masked\n");
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_mask_irqs);
 
 /* ------------------------------------------------------------------ */
 /* 中断辅助                                                            */
@@ -2291,10 +2334,18 @@ const struct airoha_xpon_proto_ops airoha_xpon_gpon_ops = {
 	.phy_irq	= NULL,		/* PHY 中断由 pon-frontend 处理 */
 
 	.los		= airoha_xpon_gpon_los,
+	/* GPON 的 PCS 同步由 pon-frontend 统一管理，MAC 层不重复判断 */
 	.pcs_synced	= NULL,
 
 	.advance	= airoha_xpon_gpon_advance,
 
+	/*
+	 * OMCI 控制通道全部留空，让 main.c 走默认 fallback：
+	 *   control_rx      → airoha_xpon_omci_receive(xpon->omci, ...)
+	 *   control_match   → 按 ONU-ID 匹配 OMCC XGEM Port-ID
+	 *   control_wake_tx → airoha_xpon_omci_wake_tx(xpon->omci)
+	 * GPON 用 OMCI（ITU-T G.988），这三处由上游 omci 对象处理即可。
+	 */
 	.control_rx	= NULL,		/* OMCI 由上游 omci 对象处理 */
 	.control_match	= NULL,
 	.control_wake_tx = NULL,
