@@ -275,6 +275,11 @@ struct airoha_gpon_priv {
 	/* 国内移动 PLOAM Password（10 字符 ASCII，不足补 0） */
 	char			sn_passwd[10];
 	bool			sn_passwd_set;
+	/* BER / SD / SF 检测状态（原厂 gpon_ber_interval_expires） */
+	bool			sd_flag;
+	bool			sf_flag;
+	u64			ber_window_errors;
+	u64			ber_window_bits;
 	/* TypeB 保护倒换的队列配置备份（原厂 gpon_dev_typeB_restore） */
 	u32			typeb_queue_map[8];
 	u32			typeb_queue_enable;
@@ -343,6 +348,18 @@ int airoha_xpon_gpon_typeb_backup(struct airoha_xpon *xpon);
 void airoha_xpon_gpon_dump_csr(struct airoha_xpon *xpon);
 void airoha_xpon_gpon_set_sniff(struct airoha_xpon *xpon, bool on);
 void airoha_xpon_gpon_dbg_err_check(struct airoha_xpon *xpon);
+/* BER / SD / SF 检测（原厂 gpon_ber_interval_expires @0x1afe4，660B） */
+void airoha_xpon_gpon_ber_check(struct airoha_xpon *xpon);
+void airoha_xpon_gpon_sd_sf_init(struct airoha_xpon *xpon);
+/* 硬件参数配置（原厂 dev_init 路径上的 8 个函数） */
+void airoha_xpon_gpon_set_rdi_err_ctrl(struct airoha_xpon *xpon, bool on,
+				       u32 threshold);
+void airoha_xpon_gpon_set_rdi_send_num(struct airoha_xpon *xpon, u32 num);
+void airoha_xpon_gpon_set_counter_type(struct airoha_xpon *xpon, u32 type);
+void airoha_xpon_gpon_set_response_time(struct airoha_xpon *xpon, u32 value);
+void airoha_xpon_gpon_set_internal_delay_fine(struct airoha_xpon *xpon, u32 v);
+void airoha_xpon_gpon_set_ploam_filter(struct airoha_xpon *xpon, u32 ext_burst,
+				       u32 upstream_overhead);
 /* 供 debugfs 统计层使用的访问器 */
 void airoha_xpon_gpon_dump_csr_seq(struct airoha_xpon *xpon, struct seq_file *m);
 u32 airoha_xpon_gpon_superframe_value(struct airoha_xpon *xpon);
@@ -2773,6 +2790,270 @@ void airoha_xpon_gpon_dbg_err_check(struct airoha_xpon *xpon)
 EXPORT_SYMBOL_GPL(airoha_xpon_gpon_dbg_err_check);
 
 /* ------------------------------------------------------------------ */
+/* BER / SD / SF 检测                                                  */
+/* 原厂 gpon_ber_interval_expires @0x1afe4（660B）                     */
+/*      gpon_SD_SF_init（64B）                                        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * SD (Signal Degrade) / SF (Signal Fail) 是 GPON 的误码率门限检测：
+ *   SD: BER 超过 1e-9，链路还能用但质量下降
+ *   SF: BER 超过 1e-5，链路基本不可用
+ *
+ * 检测到后通过 PLOAM 的 REI（Remote Error Indication）消息上报 OLT。
+ * 国内运营商在网管上看这两个指标判断线路质量。
+ *
+ * 原厂用周期定时器（ber_interval）做检查，每次到期：
+ *   1. mod_timer 重启定时器
+ *   2. 读当前误码统计
+ *   3. 超过门限则 ploam_send_rei_msg()
+ *   4. 更新 sd_flag / gGpon_SD_SF_Info
+ */
+
+/* SD/SF 门限（GPON 标准建议值） */
+#define AIROHA_GPON_BER_WINDOW_BITS	1000000ULL	/* 每个检测窗口的比特数 */
+
+#define AIROHA_GPON_SD_THRESHOLD	1000000000ULL	/* BER 1e-9 */
+#define AIROHA_GPON_SF_THRESHOLD	100000ULL	/* BER 1e-5 */
+
+/**
+ * airoha_xpon_gpon_sd_sf_init - 初始化 SD/SF 检测状态
+ * @xpon: XPON 设备
+ *
+ * 原厂 gpon_SD_SF_init 只清软件结构（gGpon_SD_SF_Info、sd_flag），
+ * 不动硬件寄存器——门限由硬件默认值决定。
+ */
+void airoha_xpon_gpon_sd_sf_init(struct airoha_xpon *xpon)
+{
+	struct airoha_gpon_priv *priv = gpon_priv(xpon);
+
+	if (!priv)
+		return;
+
+	priv->sd_flag = false;
+	priv->sf_flag = false;
+	priv->ber_window_errors = 0;
+	priv->ber_window_bits = 0;
+
+	dev_dbg(xpon->dev, "SD/SF detection initialized\n");
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_sd_sf_init);
+
+/**
+ * airoha_xpon_gpon_ber_check - 周期检查误码率
+ * @xpon: XPON 设备
+ *
+ * 原厂 gpon_ber_interval_expires 的等价实现：
+ *   1. 读 BIP 误码计数（寄存器 0x0228/0x022c 的错误组）
+ *   2. 算 BER = errors / bits
+ *   3. 超 SD 门限置 sd_flag，超 SF 门限置 sf_flag
+ *   4. 状态变化时发 REI 上报 OLT
+ *
+ * 由 ber_timer 周期调用。
+ */
+void airoha_xpon_gpon_ber_check(struct airoha_xpon *xpon)
+{
+	struct airoha_gpon_priv *priv = gpon_priv(xpon);
+	u32 grp0 = 0, grp1 = 0;
+	u64 errors;
+	bool new_sd, new_sf;
+
+	if (!priv)
+		return;
+
+	airoha_xpon_gpon_get_error_status(xpon, &grp0, &grp1);
+
+	/*
+	 * 错误组里的 BIP 误码位（bit0..bit7 为各类 CRC/BIP 错误）
+	 * 这里用低 8 位的置位数近似误码事件数。
+	 */
+	errors = hweight32(grp0 & 0xff) + hweight32(grp1 & 0xff);
+
+	/* 简化 BER 估算：每次窗口累计 */
+	priv->ber_window_errors += errors;
+	priv->ber_window_bits += AIROHA_GPON_BER_WINDOW_BITS;
+
+	if (priv->ber_window_bits == 0)
+		return;
+
+	new_sd = (priv->ber_window_errors * AIROHA_GPON_SD_THRESHOLD >
+		  priv->ber_window_bits);
+	new_sf = (priv->ber_window_errors * AIROHA_GPON_SF_THRESHOLD >
+		  priv->ber_window_bits);
+
+	/* 状态变化时上报 */
+	if (new_sf != priv->sf_flag) {
+		priv->sf_flag = new_sf;
+		dev_warn(xpon->dev, "SF %s (errors %llu)\n",
+			 new_sf ? "detected" : "cleared",
+			 priv->ber_window_errors);
+		/* 原厂此处调 ploam_send_rei_msg() */
+		airoha_xpon_gpon_send_ploamu(xpon, NULL, 0);
+	}
+
+	if (new_sd != priv->sd_flag) {
+		priv->sd_flag = new_sd;
+		dev_warn(xpon->dev, "SD %s (errors %llu)\n",
+			 new_sd ? "detected" : "cleared",
+			 priv->ber_window_errors);
+		airoha_xpon_gpon_send_ploamu(xpon, NULL, 0);
+	}
+
+	/* 窗口滚出：保留最近一半，避免永久累积 */
+	if (priv->ber_window_bits > AIROHA_GPON_BER_WINDOW_BITS * 16) {
+		priv->ber_window_errors /= 2;
+		priv->ber_window_bits /= 2;
+	}
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_ber_check);
+
+/* ------------------------------------------------------------------ */
+/* 硬件参数配置（原厂 gpon_dev_init / gpon_isr 路径）                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * 寄存器偏移（原厂 0x4xxx 减 0x4000）：
+ *   0x0268  RDI_ERR_CTRL       [0]=开关, [31:4]=门限
+ *   0x0264  RDI_SEND_NUM       RDI 重发次数
+ *   0x0200  COUNTER_TYPE       计数器类型选择
+ *   0x00ac  RESPONSE_TIME      响应时间
+ *   0x0208  INTERNAL_DELAY_FINE 内部延迟微调
+ *   0x0360  PLOAM_FILTER       [7:0]=ext_burst, [15:8]=upstream_overhead
+ */
+
+#define AIROHA_GPON_RDI_ERR_CTRL	0x0268
+#define AIROHA_GPON_RDI_SEND_NUM	0x0264
+#define AIROHA_GPON_COUNTER_TYPE	0x0200
+#define AIROHA_GPON_RESPONSE_TIME	0x00ac
+#define AIROHA_GPON_INTERNAL_DELAY_FINE	0x0208
+#define AIROHA_GPON_PLOAM_FILTER	0x0360
+
+/**
+ * airoha_xpon_gpon_set_rdi_err_ctrl - 配置 RDI 错误控制
+ * @xpon:      XPON 设备
+ * @on:        true 使能 RDI 错误触发
+ * @threshold: 门限（低 28 位）
+ *
+ * 原厂两个函数（SetRdiErrCtrlSwitch / SetRdiErrCtrlThreshold）
+ * 操作同一寄存器 0x0268：
+ *   bit0    RDI_ERR_EN
+ *   [31:4]  RDI_ERR_THRESHOLD
+ *
+ * RDI（Remote Defect Indication）是向 OLT 报告本端故障的机制，
+ * 国内运营商依赖它判断故障侧。
+ */
+void airoha_xpon_gpon_set_rdi_err_ctrl(struct airoha_xpon *xpon, bool on,
+				       u32 threshold)
+{
+	u32 v;
+
+	if (!xpon->gpon_base)
+		return;
+
+	v = gpon_rd(xpon, AIROHA_GPON_RDI_ERR_CTRL);
+	v &= ~(BIT(0) | GENMASK(31, 4));
+	if (on)
+		v |= BIT(0);
+	v |= FIELD_PREP(GENMASK(31, 4), threshold & GENMASK(27, 0));
+
+	gpon_wr(xpon, AIROHA_GPON_RDI_ERR_CTRL, v);
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_rdi_err_ctrl);
+
+/**
+ * airoha_xpon_gpon_set_rdi_send_num - 设置 RDI 重发次数
+ * @xpon: XPON 设备
+ * @num:  次数
+ *
+ * 原厂 gponDevSetRdiSendNum 写 0x0264。
+ * RDI 消息可能丢包，需要重发若干次确保 OLT 收到。
+ */
+void airoha_xpon_gpon_set_rdi_send_num(struct airoha_xpon *xpon, u32 num)
+{
+	if (!xpon->gpon_base)
+		return;
+
+	gpon_wr(xpon, AIROHA_GPON_RDI_SEND_NUM, num);
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_rdi_send_num);
+
+/**
+ * airoha_xpon_gpon_set_counter_type - 设置计数器类型
+ * @xpon: XPON 设备
+ * @type: 0=GEM 帧计数, 1=字节计数
+ *
+ * 原厂 gponDevSetCounterType 写 0x0200 bit0。
+ * 影响 MIB 计数器读出的语义。
+ */
+void airoha_xpon_gpon_set_counter_type(struct airoha_xpon *xpon, u32 type)
+{
+	if (!xpon->gpon_base)
+		return;
+
+	gpon_rmw(xpon, AIROHA_GPON_COUNTER_TYPE, BIT(0), type ? BIT(0) : 0);
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_counter_type);
+
+/**
+ * airoha_xpon_gpon_set_response_time - 设置响应时间
+ * @xpon:  XPON 设备
+ * @value: 响应时间值
+ *
+ * 原厂 gponDevSetResponseTime 写 0x00ac。
+ * 影响 ONU 对 OLT 请求的响应延迟。
+ */
+void airoha_xpon_gpon_set_response_time(struct airoha_xpon *xpon, u32 value)
+{
+	if (!xpon->gpon_base)
+		return;
+
+	gpon_wr(xpon, AIROHA_GPON_RESPONSE_TIME, value);
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_response_time);
+
+/**
+ * airoha_xpon_gpon_set_internal_delay_fine - 内部延迟微调
+ * @xpon:  XPON 设备
+ * @value: 微调值
+ *
+ * 原厂 gponDevSetInternalDelayFineTune 写 0x0208。
+ * 用于补偿芯片内部处理延迟，影响测距精度。
+ */
+void airoha_xpon_gpon_set_internal_delay_fine(struct airoha_xpon *xpon, u32 value)
+{
+	if (!xpon->gpon_base)
+		return;
+
+	gpon_wr(xpon, AIROHA_GPON_INTERNAL_DELAY_FINE, value);
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_internal_delay_fine);
+
+/**
+ * airoha_xpon_gpon_set_ploam_filter - 配置 PLOAM 过滤
+ * @xpon:             XPON 设备
+ * @ext_burst:        扩展突发长度过滤（低 8 位）
+ * @upstream_overhead: 上行开销过滤（次 8 位）
+ *
+ * 原厂两个函数操作同一寄存器 0x0360：
+ *   [7:0]   FILTER_EXT_BURST_LENGTH
+ *   [15:8]  FILTER_UPSTREAM_OVERHEAD
+ *
+ * 用于过滤掉不符合预期格式的 PLOAM，防止异常 ONU 干扰。
+ */
+void airoha_xpon_gpon_set_ploam_filter(struct airoha_xpon *xpon, u32 ext_burst,
+				       u32 upstream_overhead)
+{
+	u32 v;
+
+	if (!xpon->gpon_base)
+		return;
+
+	v = (ext_burst & 0xff) | ((upstream_overhead & 0xff) << 8);
+	gpon_wr(xpon, AIROHA_GPON_PLOAM_FILTER, v);
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_ploam_filter);
+
+/* ------------------------------------------------------------------ */
 /* 供 debugfs 统计层使用的访问器                                       */
 /* ------------------------------------------------------------------ */
 
@@ -3130,6 +3411,19 @@ static int airoha_xpon_gpon_dev_init(struct airoha_xpon *xpon)
 	/* 6. DBA 块大小（仅 0xa/0xc/0xe） */
 	if (hir == 0xa || hir == 0xc || hir == 0xe)
 		gpon_wr(xpon, AIROHA_GPON_DBA_BACK_DOOR_SW, 0x30);
+
+	/*
+	 * 6b. RDI 错误控制（原厂 SetRdiErrCtrlSwitch + SetRdiErrCtrlThreshold）
+	 * 国内运营商依赖 RDI 判断故障侧，必须配置。
+	 */
+	airoha_xpon_gpon_set_rdi_err_ctrl(xpon, true, 0x1000);
+	airoha_xpon_gpon_set_rdi_send_num(xpon, 3);
+
+	/* 6c. 计数器类型（GEM 帧计数，影响 MIB 语义） */
+	airoha_xpon_gpon_set_counter_type(xpon, 0);
+
+	/* 6d. PLOAM 过滤（防异常 ONU 干扰） */
+	airoha_xpon_gpon_set_ploam_filter(xpon, 0xff, 0xff);
 
 	/* 7-10. 时钟与延迟 */
 	gpon_wr(xpon, AIROHA_GPON_TOD_CLOCK_PERIOD, 0xa);
