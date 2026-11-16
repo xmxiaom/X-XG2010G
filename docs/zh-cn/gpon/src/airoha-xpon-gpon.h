@@ -12,6 +12,9 @@
  */
 
 #ifndef _AIROHA_XPON_GPON_H_
+/* T-CONT 索引上限（12 位 Alloc-ID 里 T-CONT 占 5 位） */
+#define AIROHA_GPON_TCONT_MAX		0x1f
+
 #define _AIROHA_XPON_GPON_H_
 
 #include <linux/interrupt.h>
@@ -64,6 +67,8 @@ bool airoha_xpon_gpon_backoff_ok(struct airoha_xpon *xpon);
 int  airoha_xpon_gpon_set_gem_info(struct airoha_xpon *xpon, u16 gem_port,
 				   bool upstream, bool encrypt);
 int  airoha_xpon_gpon_get_gem_info(struct airoha_xpon *xpon, u16 gem_port);
+int  airoha_xpon_gpon_get_gem_counter(struct airoha_xpon *xpon, u16 gem_port,
+				      u32 *rx_gem, u32 *tx_gem);
 int  airoha_xpon_gpon_set_alloc_id(struct airoha_xpon *xpon, u8 tcont,
 				   u16 alloc_id);
 u16  airoha_xpon_gpon_get_alloc_id(struct airoha_xpon *xpon, u8 tcont);
@@ -95,5 +100,23 @@ u32  airoha_xpon_gpon_get_hw_param(struct airoha_xpon *xpon, u32 reg);
 
 /* ---- 调试 ---- */
 void airoha_xpon_gpon_debug_mac(struct airoha_xpon *xpon, struct seq_file *m);
+
+
+/* 供 stats.c / debugfs 使用的内部接口 */
+void airoha_xpon_gpon_dump_csr_seq(struct airoha_xpon *xpon, struct seq_file *m);
+int airoha_xpon_gpon_get_error_status(struct airoha_xpon *xpon, u32 *grp0, u32 *grp1);
+void airoha_xpon_gpon_get_superframe(struct airoha_xpon *xpon);
+int airoha_xpon_gpon_get_tcont_counter(struct airoha_xpon *xpon, u16 tcont, u32 *rx, u32 *tx);
+void airoha_xpon_gpon_set_dba_shift_modify(struct airoha_xpon *xpon, bool on);
+void airoha_xpon_gpon_set_dba_slight_modify(struct airoha_xpon *xpon, bool on);
+void airoha_xpon_gpon_set_dba_slight_value(struct airoha_xpon *xpon, u32 green, u32 total, u32 yellow);
+int airoha_xpon_gpon_set_sn_passwd(struct airoha_xpon *xpon, const char *pwd, size_t len);
+void airoha_xpon_gpon_show_emergence(struct airoha_xpon *xpon, struct seq_file *m);
+const char * airoha_xpon_gpon_sn_passwd(struct airoha_xpon *xpon);
+u32 airoha_xpon_gpon_superframe_value(struct airoha_xpon *xpon);
+int airoha_xpon_gpon_typeb_backup(struct airoha_xpon *xpon);
+bool airoha_xpon_gpon_typeb_backup_valid(struct airoha_xpon *xpon);
+int airoha_xpon_gpon_typeb_reset(struct airoha_xpon *xpon, bool for_typeb);
+int airoha_xpon_gpon_typeb_restore(struct airoha_xpon *xpon);
 
 #endif /* _AIROHA_XPON_GPON_H_ */

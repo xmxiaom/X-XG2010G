@@ -203,7 +203,7 @@ typedef int (*airoma_ploamd_fn)(struct airoha_xpon *xpon, const u8 *msg);
  * 实际接入上游时，若上游已有等价字段（如 xpon->mib），优先复用。
  */
 /* T-CONT 数量：原厂 gpon_qos_init 的循环是 cmp w0, #0x1f，即 0..31 共 32 个 */
-#define AIROHA_GPON_TCONT_MAX		0x1f
+/* AIROHA_GPON_TCONT_MAX 定义在 gpon.h，stats.c 也要用 */
 
 /**
  * struct airoha_gpon_tcont_cfg - 单个 T-CONT 的 DBA 参数
@@ -251,6 +251,8 @@ struct airoha_gpon_priv {
 	u8			last_ploamd[AIROHA_GPON_PLOAM_BYTES];	/* +0x1d0 */
 	u8			vssn[8];		/* +0x1dd */
 	u32			to1_ms;			/* +0x210 */
+	bool			to1_expired;		/* TO1 超时标记 */
+	bool			to2_expired;		/* TO2 超时标记 */
 	u32			to2_ms;			/* +0x214 */
 	u32			last_eqd;		/* +0x220 上次的 EqD 基准 */
 	u32			eqd_pending;		/* +0x224 待写入的 EqD */
@@ -415,10 +417,89 @@ static inline void gpon_rmw(struct airoha_xpon *xpon, u32 off, u32 mask, u32 val
 	gpon_wr(xpon, off, tmp);
 }
 
+int airoha_xpon_gpon_priv_init(struct airoha_xpon *xpon);
+
 static inline struct airoha_gpon_priv *gpon_priv(struct airoha_xpon *xpon)
 {
 	return xpon->gpon_priv;
 }
+
+/*
+ * TO1/TO2 超时回调。
+ *
+ * TO1（O4→O5 等待）：OLT 下发 Registration 后等待 OMCI 建立。
+ * TO2（O5 保持）：周期检查链路是否还在 O5。
+ *
+ * 原厂用 gpon_act_to1_timer_expires / gpon_act_to2_timer_expires
+ * 两个独立回调，这里合并为一个，用定时器指针区分。
+ *
+ * 注意：定时器在 softirq 上下文运行，不能睡眠，因此只做状态标记，
+ * 重活交给主状态机。
+ */
+static void airoha_xpon_gpon_to1_expires(struct timer_list *t)
+{
+	struct airoha_gpon_priv *priv = timer_container_of(priv, t, to1_timer);
+
+	if (!priv)
+		return;
+
+	priv->to1_expired = true;
+}
+
+static void airoha_xpon_gpon_to2_expires(struct timer_list *t)
+{
+	struct airoha_gpon_priv *priv = timer_container_of(priv, t, to2_timer);
+
+	if (!priv)
+		return;
+
+	priv->to2_expired = true;
+}
+
+/**
+ * airoha_xpon_gpon_priv_init - 分配并初始化 GPON 私有数据
+ * @xpon: XPON 设备
+ *
+ * 补上此前缺失的两件事：
+ *   1. 分配 xpon->gpon_priv。此前该指针从未分配，恒为 NULL，
+ *      导致所有 GPON 函数在 `if (!priv) return` 处直接退出，
+ *      GPON 功能完全不可用。
+ *   2. timer_setup 初始化 to1_timer / to2_timer。此前未初始化
+ *      就直接 mod_timer，会在内核里触发 BUG。
+ *
+ * 返回 0 成功，负值失败。
+ */
+int airoha_xpon_gpon_priv_init(struct airoha_xpon *xpon)
+{
+	struct airoha_gpon_priv *priv;
+
+	if (!xpon)
+		return -EINVAL;
+
+	if (xpon->gpon_priv)
+		return 0;	/* 已初始化，幂等 */
+
+	priv = devm_kzalloc(xpon->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
+		return -ENOMEM;
+
+	/* 初始状态 O1，默认超时值（原厂默认） */
+	priv->state = AIROHA_GPON_O1_INITIAL;
+	priv->to1_ms = 10000;	/* 10 秒：等 OMCI 建立 */
+	priv->to2_ms = 30000;	/* 30 秒：O5 保持检查 */
+	priv->hw_param_cache = -1;
+	priv->to1_expired = false;
+	priv->to2_expired = false;
+
+	timer_setup(&priv->to1_timer, airoha_xpon_gpon_to1_expires, 0);
+	timer_setup(&priv->to2_timer, airoha_xpon_gpon_to2_expires, 0);
+
+	xpon->gpon_priv = priv;
+
+	dev_dbg(xpon->dev, "GPON private data initialized\n");
+	return 0;
+}
+EXPORT_SYMBOL_GPL(airoha_xpon_gpon_priv_init);
 
 /* ------------------------------------------------------------------ */
 /* PLOAMu 发送                                                         */
@@ -1422,10 +1503,19 @@ EXPORT_SYMBOL_GPL(airoha_xpon_gpon_get_hw_param);
 
 int airoha_xpon_gpon_start_rx(struct airoha_xpon *xpon)
 {
-	struct airoha_gpon_priv *priv = gpon_priv(xpon);
+	struct airoha_gpon_priv *priv;
 	int ret;
 
-	if (!xpon->gpon_base || !priv)
+	if (!xpon->gpon_base)
+		return -ENODEV;
+
+	/* 首次进入时分配私有数据并初始化定时器 */
+	ret = airoha_xpon_gpon_priv_init(xpon);
+	if (ret)
+		return ret;
+
+	priv = gpon_priv(xpon);
+	if (!priv)
 		return -ENODEV;
 
 	/* 清中断、清计数器 */
@@ -1460,8 +1550,8 @@ void airoha_xpon_gpon_stop_rx(struct airoha_xpon *xpon)
 	if (!xpon->gpon_base || !priv)
 		return;
 
-	del_timer_sync(&priv->to1_timer);
-	del_timer_sync(&priv->to2_timer);
+	timer_delete_sync(&priv->to1_timer);
+	timer_delete_sync(&priv->to2_timer);
 
 	gpon_wr(xpon, AIROHA_GPON_GPON_MAC_INTERRUPTS_ENABLE, 0);
 	airoha_xpon_gpon_write_state(xpon, AIROHA_GPON_O1_INITIAL);

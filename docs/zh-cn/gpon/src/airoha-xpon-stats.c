@@ -41,6 +41,10 @@
 #include <linux/uaccess.h>
 
 #include "airoha-xpon-private.h"
+
+/* 对外接口（供 proto 层调用） */
+int airoha_xpon_stats_create(struct airoha_xpon *xpon);
+void airoha_xpon_stats_destroy(struct airoha_xpon *xpon);
 #include "airoha-xpon-proto.h"
 #include "airoha-xpon-gpon.h"
 
