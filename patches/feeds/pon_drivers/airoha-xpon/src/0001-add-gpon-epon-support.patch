@@ -12,10 +12,10 @@ index 44479aa..5e69f0e 100644
 +	airoha-xpon-stats.o
 diff --git a/airoha-xpon/src/airoha-xpon-epon-hw.c b/airoha-xpon/src/airoha-xpon-epon-hw.c
 new file mode 100644
-index 0000000..c25628c
+index 0000000..92a7778
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-epon-hw.c
-@@ -0,0 +1,545 @@
+@@ -0,0 +1,674 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 EPON —— 原厂寄存器初始化序列 + 协议操作表
@@ -84,6 +84,11 @@ index 0000000..c25628c
 +int airoha_epon_hw_set_llid_fec(struct airoha_xpon *xpon, u8 llid, bool on);
 +int airoha_epon_hw_set_llid_enable_mask(struct airoha_xpon *xpon, u8 mask);
 +int airoha_epon_hw_set_llid_threshold(struct airoha_xpon *xpon, u32 value);
++int airoha_epon_hw_set_report(struct airoha_xpon *xpon, u32 q0, u32 q1, u32 qnum);
++int airoha_epon_hw_set_grant_length(struct airoha_xpon *xpon, u32 value);
++int airoha_epon_hw_set_queue_threshold(struct airoha_xpon *xpon, u32 threshold);
++int airoha_epon_hw_set_txbuf_usage(struct airoha_xpon *xpon, u32 usage);
++int airoha_epon_hw_phy_tx_power_up(struct airoha_xpon *xpon);
 +
 +/* ------------------------------------------------------------------ */
 +/* 寄存器访问                                                          */
@@ -558,6 +563,130 @@ index 0000000..c25628c
 +	return 0;
 +}
 +EXPORT_SYMBOL_GPL(airoha_epon_hw_set_llid_threshold);
++
++/* ------------------------------------------------------------------ */
++/* 上报（REPORT）与队列/突发配置                                       */
++/* 原厂 eponSetStaticReport @?（428B）→ 0x0060/0x0064/0x00d8          */
++/*      eponSetReportData（276B）→ 0x0060/0x0064                     */
++/*      eponSetGrantLength（360B）→ 0x00f8                           */
++/*      eponSetLlidQueThrod（244B）                                  */
++/*      eponMacSetTxbufUsage（344B）                                 */
++/* ------------------------------------------------------------------ */
++
++#define AIROHA_EPON_REPORT_CFG0		0x0060
++#define AIROHA_EPON_REPORT_CFG1		0x0064
++#define AIROHA_EPON_REPORT_QUEUE	0x00d8
++#define AIROHA_EPON_GRANT_LENGTH	0x00f8
++
++/**
++ * airoha_epon_hw_set_report - 配置上报（REPORT）参数
++ * @xpon:   XPON 设备
++ * @q0:     队列 0 的报限量
++ * @q1:     队列 1 的报限量
++ * @qnum:   上报的队列数
++ *
++ * 原厂 eponSetReportData + eponSetStaticReport 合并：
++ *   0x0060  队列 0 报限
++ *   0x0064  队列 1 报限
++ *   0x00d8  上报队列配置
++ *
++ * EPON 上行靠 REPORT 帧向 OLT 申请带宽，不配置则拿不到上行时隙，
++ * 是国内注册的必需环节。原厂在 eponMacSwReset 里调用。
++ */
++int airoha_epon_hw_set_report(struct airoha_xpon *xpon, u32 q0, u32 q1,
++			      u32 qnum)
++{
++	if (!xpon->epon_base)
++		return -ENODEV;
++
++	epon_hw_wr(xpon, AIROHA_EPON_REPORT_CFG0, q0);
++	epon_hw_wr(xpon, AIROHA_EPON_REPORT_CFG1, q1);
++	epon_hw_wr(xpon, AIROHA_EPON_REPORT_QUEUE, qnum & 0xff);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_epon_hw_set_report);
++
++/**
++ * airoha_epon_hw_set_grant_length - 设置 Grant 长度
++ * @xpon:  XPON 设备
++ * @value: 最大 Grant 长度
++ *
++ * 原厂 eponSetGrantLength 写 0x00f8，被 eponMpcpDiscvGateIntHandler 调用。
++ * 决定单次上行突发的最大长度，影响上行吞吐。
++ */
++int airoha_epon_hw_set_grant_length(struct airoha_xpon *xpon, u32 value)
++{
++	if (!xpon->epon_base)
++		return -ENODEV;
++
++	epon_hw_wr(xpon, AIROHA_EPON_GRANT_LENGTH, value);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_epon_hw_set_grant_length);
++
++/**
++ * airoha_epon_hw_set_queue_threshold - 设置 LLID 队列门限
++ * @xpon:      XPON 设备
++ * @threshold: 门限值
++ *
++ * 原厂 eponSetLlidQueThrod，被 eponMacIoctl 调用。
++ * 队列积压超过门限时触发流控，防止上行拥塞。
++ */
++int airoha_epon_hw_set_queue_threshold(struct airoha_xpon *xpon, u32 threshold)
++{
++	if (!xpon->epon_base)
++		return -ENODEV;
++
++	epon_hw_wr(xpon, AIROHA_EPON_LLID_THRESHOLD, threshold);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_epon_hw_set_queue_threshold);
++
++/**
++ * airoha_epon_hw_set_txbuf_usage - 设置 TX buffer 使用率
++ * @xpon:  XPON 设备
++ * @usage: 使用率（0..100）
++ *
++ * 原厂 eponMacSetTxbufUsage，被 eponMacSetLlidEnableMask 调用。
++ * 控制发送缓冲的占用上限，避免缓冲耗尽导致丢包。
++ */
++int airoha_epon_hw_set_txbuf_usage(struct airoha_xpon *xpon, u32 usage)
++{
++	if (!xpon->epon_base)
++		return -ENODEV;
++
++	epon_hw_wr(xpon, AIROHA_EPON_LLID_FEC_CTRL,
++		   FIELD_PREP(GENMASK(15, 8), usage & 0xff));
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_epon_hw_set_txbuf_usage);
++
++/**
++ * airoha_epon_hw_phy_tx_power_up - 上电光模块发射
++ * @xpon: XPON 设备
++ *
++ * 原厂 eponPhyTxPwrUp，被 eponInit 调用（启动路径）。
++ * 打开激光器发射，不上电则无法上行。
++ *
++ * 注意：上游已通过 optical-frontend 提供方管理激光器，
++ * 本函数作为兼容接口保留，若前端不可用则直接操作 PON PHY。
++ */
++int airoha_epon_hw_phy_tx_power_up(struct airoha_xpon *xpon)
++{
++	if (!xpon->pon_phy_base)
++		return -ENODEV;
++
++	/*
++	 * PON PHY 的 TX 使能位（与 GPON 共用同一 PHY 窗口）。
++	 * 上游 frontend 若已处理则此写为幂等。
++	 */
++	writel(readl(xpon->pon_phy_base + 0x0c) | BIT(0),
++	       xpon->pon_phy_base + 0x0c);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_epon_hw_phy_tx_power_up);
 +
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("Airoha xPON EPON register initialization sequence");
