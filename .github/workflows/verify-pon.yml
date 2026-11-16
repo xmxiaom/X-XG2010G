@@ -69,22 +69,27 @@ jobs:
           # airoha-pon-frontends 的 Makefile 依赖内核 .config：
           #   make[2]: *** No rule to make target '.../linux-6.18.60/.config',
           #            needed by '.../airoha-pon-frontends/.built'
-          # 第 9 次验证就卡在这里（与 PON 代码无关，是构建顺序问题）。
+          # 第 9 次验证卡在这里（与 PON 代码无关，是构建顺序问题）。
           #
-          # 只生成内核配置，不编译内核本体（省时间）。
+          # 注意：target/linux/compile 会编整个内核（很慢且容易失败），
+          # 我们只需要 .config 文件本身。用 prepare 目标生成即可。
           set -o pipefail
-          # 1) 生成 .config（顶层）
-          make defconfig BUILD_LOG=1 2>&1 | tail -5
-          # 2) 展开内核源码树（这会创建 build_dir/.../linux-6.18.60/）
-          make target/linux/compile BUILD_LOG=1 -j$(nproc) 2>&1 | tail -15 || true
-          # 3) 确认 .config 存在
+          make defconfig BUILD_LOG=1 2>&1 | tail -5 || true
+          make target/linux/prepare BUILD_LOG=1 2>&1 | tail -10 || true
+
           KCONF=$(ls build_dir/target-*/linux-*/.config 2>/dev/null | head -1)
           if [ -n "$KCONF" ]; then
             echo "✅ 内核配置已生成: $KCONF"
           else
-            echo "⚠️ 内核 .config 未生成，列出 build_dir："
-            ls build_dir/target-*/linux-*/ 2>/dev/null | head -20
+            echo "⚠️ prepare 未生成 .config，尝试直接构造"
+            mkdir -p "$(dirname "$(ls -d build_dir/target-*/linux-* 2>/dev/null | head -1)")" 2>/dev/null || true
+            KLINUX=$(ls -d build_dir/target-*/linux-* 2>/dev/null | head -1)
+            if [ -n "$KLINUX" ]; then
+              cp .config "$KLINUX/.config" 2>/dev/null || true
+              echo "  已复制顶层 .config 到 $KLINUX/.config"
+            fi
           fi
+          ls -la build_dir/target-*/linux-*/.config 2>/dev/null || echo "(.config 仍不存在)"
 
       - name: Compile airoha-xpon
         run: |

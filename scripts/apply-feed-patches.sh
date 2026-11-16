@@ -63,11 +63,14 @@ while IFS= read -r -d '' patch_file; do
 		continue
 	fi
 
-	if git -C "$feed_dir" apply --check < "$patch_file" 2>/dev/null; then
+	# onu_config 的源文件是 CRLF，而 CI 的 core.autocrlf 会把检出转成 LF，
+	# 导致补丁的 CRLF 上下文匹配不上。--ignore-whitespace 让 git 忽略
+	# 行尾空白差异，两种行尾都能应用。
+	if git -C "$feed_dir" apply --ignore-whitespace --check < "$patch_file" 2>/dev/null; then
 		echo "Applying feed patch: $patch_file"
-		git -C "$feed_dir" apply < "$patch_file"
+		git -C "$feed_dir" apply --ignore-whitespace < "$patch_file"
 		applied=$((applied + 1))
-	elif git -C "$feed_dir" apply --reverse --check < "$patch_file" 2>/dev/null; then
+	elif git -C "$feed_dir" apply --reverse --ignore-whitespace --check < "$patch_file" 2>/dev/null; then
 		echo "Feed patch already applied: $patch_file"
 		skipped=$((skipped + 1))
 	else
