@@ -327,6 +327,24 @@
 	nvmem-cells = <&pon_serial>;
 	nvmem-cell-names = "pon-serial";
 	status = "okay";
+
+	/*
+	 * PON 制式。可被以下方式覆盖（优先级从高到低）：
+	 *   1. bootargs 里的 xpon.mode=<name>
+	 *   2. UCI pon.line0.mode + /etc/init.d/pon（ponctl mode set）
+	 *   3. 本属性
+	 *
+	 * 可选值：
+	 *   gpon         GPON 2.5G/1.25G    中国联通、中国移动主流
+	 *   epon-1g      EPON 1G/1G         中国电信主流
+	 *   xgpon        XG-PON 10G/2.5G    千兆以上
+	 *   xgspon       XGS-PON 10G/10G    对称万兆
+	 *   epon-10g-1g  10G-EPON 非对称
+	 *   epon-10g-10g 10G-EPON 对称
+	 *
+	 * 默认 gpon：国内存量最大的制式，且 epon-1g 可通过 UCI 切换。
+	 */
+	airoha,default-line-mode = "gpon";
 };
 
 &gdm2 {

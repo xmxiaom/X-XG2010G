@@ -1,0 +1,42 @@
+diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
+index 19e9dfc..d8d580c 100644
+--- a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
++++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
+@@ -159,13 +159,9 @@ return view.extend({
+ 		o.description = _('ONU class reported to the OLT in the capability ME: 0 SFU, 1 HGU (default), 2 SBU.');
+ 
+ 		o = s.option(form.ListValue, 'mode', _('Line mode'));
+-		o.default = 'xgpon';
+-		o.rmempty = false;
+-		/*
+-		 * GPON 2.5G/1.25G and EPON 1G/1G are masked out of this build: only the
+-		 * 10G line modes are offered. Both values stay valid in the daemons, so a
+-		 * board configured with either one still runs.
+-		 */
++		o.default = 'gpon';
++		o.value('gpon', _('GPON 2.5G/1.25G'));
++		o.value('epon-1g', _('EPON 1G/1G'));
+ 		o.value('xgpon', _('XG-PON 10G/2.5G'));
+ 		o.value('xgspon', _('XGS-PON 10G/10G'));
+ 		o.value('epon-10g-1g', _('10G-EPON 10G/1G'));
+diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
+index 3638c7b..61c1e63 100644
+--- a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
++++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
+@@ -499,13 +499,9 @@ return view.extend({
+ 		s.addremove = false;
+ 
+ 		o = s.option(form.ListValue, 'mode', _('Line mode'));
+-		o.default = 'xgpon';
+-		o.rmempty = false;
+-		/*
+-		 * GPON 2.5G/1.25G and EPON 1G/1G are masked out of this build: only the
+-		 * 10G line modes are offered. Both values stay valid in the daemons, so a
+-		 * board configured with either one still runs.
+-		 */
++		o.default = 'gpon';
++		o.value('gpon', _('GPON 2.5G/1.25G'));
++		o.value('epon-1g', _('EPON 1G/1G'));
+ 		o.value('xgpon', _('XG-PON 10G/2.5G'));
+ 		o.value('xgspon', _('XGS-PON 10G/10G'));
+ 		o.value('epon-10g-1g', _('10G-EPON 10G/1G'));
