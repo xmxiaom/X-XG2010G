@@ -1,0 +1,23 @@
+diff --git a/src/src/netlink.rs b/src/src/netlink.rs
+index bfc23e3..fc5f10e 100644
+--- a/src/src/netlink.rs
++++ b/src/src/netlink.rs
+@@ -62,13 +62,13 @@ pub enum LineMode {
+ impl LineMode {
+     /// Parse a line-mode name the CLI accepts.
+     ///
+-    /// GPON 2.5G/1.25G and EPON 1G/1G are not part of this build: the driver
+-    /// carries no line mode for them, so asking for either is refused here
+-    /// instead of failing later in the kernel.  Both stay reachable through
+-    /// `from_id()` and `name()`, which is what a board already configured with
+-    /// one of them needs to report its state.
++    /// 国内存量制式以 GPON 与 EPON 1G 为主（联通/移动用 GPON，电信用 EPON 1G），
++    /// 因此这两项必须可设置。驱动 airoha-xpon.ko 支持这两个模式名，
++    /// 枚举里也早有 Gpon = 1 / Epon1g = 4 的定义，此前只是 CLI 入口未开放。
+     pub fn parse(name: &str) -> Option<Self> {
+         match name {
++            "gpon" => Some(Self::Gpon),
++            "epon-1g" => Some(Self::Epon1g),
+             "xgpon" => Some(Self::Xgpon),
+             "xgspon" => Some(Self::Xgspon),
+             "epon-10g-1g" => Some(Self::Epon10g1g),
