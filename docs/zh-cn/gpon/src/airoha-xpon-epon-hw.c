@@ -57,6 +57,16 @@
 #include "airoha-xpon-epon.h"
 #include "airoha-xpon-epon-regs.h"
 
+/* 本文件对外接口（供 proto 层与 debugfs 调用） */
+int airoha_epon_hw_set_llid_key(struct airoha_xpon *xpon, u8 llid, u8 dir,
+				const u8 key[16]);
+int airoha_epon_hw_enable_encrypt(struct airoha_xpon *xpon, u8 llid, bool on);
+u8 airoha_epon_hw_get_llid_key_inuse(struct airoha_xpon *xpon);
+int airoha_epon_hw_set_llid_filter(struct airoha_xpon *xpon, u8 llid, bool on);
+int airoha_epon_hw_set_llid_fec(struct airoha_xpon *xpon, u8 llid, bool on);
+int airoha_epon_hw_set_llid_enable_mask(struct airoha_xpon *xpon, u8 mask);
+int airoha_epon_hw_set_llid_threshold(struct airoha_xpon *xpon, u32 value);
+
 /* ------------------------------------------------------------------ */
 /* 寄存器访问                                                          */
 /* ------------------------------------------------------------------ */
@@ -282,6 +292,254 @@ EXPORT_SYMBOL_GPL(airoha_epon_hw_debug);
 /*                                                                     */
 /* 本文件只负责「原厂寄存器初始化序列」这一件事。                        */
 /* ------------------------------------------------------------------ */
+
+/* ------------------------------------------------------------------ */
+/* 下行 AES-128 加密（中国电信 CTC 2.1/3.0 强制要求）                   */
+/* 原厂 eponSetLlidKey @0x03d2f4（492B）                               */
+/*      eponGetLlidKey @0x03d4e0（440B）                               */
+/*      eponGetLlidKeyInuse @0x03e84c（92B）                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * EPON 下行是广播，每个 ONU 能收到全部下行帧，必须靠 AES-128 加密
+ * 隔离用户数据。中国电信 CTC 2.1/3.0 明确要求「三重搅动 + AES-128」，
+ * 这是入网测试项，不是可选项。
+ *
+ * 寄存器（原厂 0x6058 / 0x605c，减 0x6000）：
+ *   0x0058  LLID_KEY_CTRL   [5:0]=LLID 索引, [7:6]=方向, [31]=触发
+ *   0x005c  LLID_KEY_DATA   16 字节密钥的一个 32 位字
+ *
+ * 原厂按 4 个 32 位字逐个写入 0x605c，每次写前更新 0x6058 的索引。
+ */
+
+#define AIROHA_EPON_LLID_KEY_CTRL	0x0058
+#define AIROHA_EPON_LLID_KEY_DATA	0x005c
+
+/* 0x0058 的位域（从表项 mask 0x8000003f 反推） */
+#define AIROHA_EPON_KEY_LLID		GENMASK(5, 0)
+#define AIROHA_EPON_KEY_DIR		GENMASK(7, 6)
+#define AIROHA_EPON_KEY_TRIGGER		BIT(31)
+
+/**
+ * airoha_epon_hw_set_llid_key - 设置指定 LLID 的 AES-128 密钥
+ * @xpon: XPON 设备
+ * @llid: LLID 索引 0..7
+ * @dir:  0=下行解密，1=上行加密
+ * @key:  16 字节 AES-128 密钥
+ *
+ * 原厂 eponSetLlidKey 的逻辑：
+ *   1. 校验 llid <= 7、dir <= 1、key 非空，否则返回 -1
+ *   2. 把 16 字节密钥按 [2],[1],[0] 顺序重排（字节序调整）
+ *   3. 分 4 次写 0x605c，每次配合 0x6058 的索引与触发位
+ *
+ * 返回 0 成功，-EINVAL 参数非法。
+ */
+int airoha_epon_hw_set_llid_key(struct airoha_xpon *xpon, u8 llid, u8 dir,
+				const u8 key[16])
+{
+	u32 ctrl;
+	int i;
+
+	if (!xpon->epon_base || !key)
+		return -ENODEV;
+
+	if (llid > 7 || dir > 1)
+		return -EINVAL;
+
+	for (i = 0; i < 4; i++) {
+		/* 密钥按大端拼 32 位字 */
+		u32 w = ((u32)key[i * 4] << 24) |
+			((u32)key[i * 4 + 1] << 16) |
+			((u32)key[i * 4 + 2] << 8) |
+			 (u32)key[i * 4 + 3];
+
+		/* 索引 = LLID + 方向 + 第几个字 */
+		ctrl = FIELD_PREP(AIROHA_EPON_KEY_LLID, llid) |
+		       FIELD_PREP(AIROHA_EPON_KEY_DIR, dir) |
+		       FIELD_PREP(AIROHA_EPON_KEY_LLID, (llid & 0x7) | ((i & 0x3) << 3)) |
+		       AIROHA_EPON_KEY_TRIGGER;
+
+		epon_hw_wr(xpon, AIROHA_EPON_LLID_KEY_DATA, w);
+		epon_hw_wr(xpon, AIROHA_EPON_LLID_KEY_CTRL, ctrl);
+	}
+
+	dev_dbg(xpon->dev, "llid %u dir %u key programmed\n", llid, dir);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(airoha_epon_hw_set_llid_key);
+
+/**
+ * airoha_epon_hw_enable_encrypt - 使能/禁用下行加密
+ * @xpon:  XPON 设备
+ * @llid:  LLID 索引 0..7
+ * @on:    true 使能
+ *
+ * 通过 0x0058 的触发位控制。
+ */
+int airoha_epon_hw_enable_encrypt(struct airoha_xpon *xpon, u8 llid, bool on)
+{
+	u32 ctrl;
+
+	if (!xpon->epon_base)
+		return -ENODEV;
+
+	if (llid > 7)
+		return -EINVAL;
+
+	ctrl = FIELD_PREP(AIROHA_EPON_KEY_LLID, llid);
+	if (on)
+		ctrl |= AIROHA_EPON_KEY_TRIGGER;
+
+	epon_hw_wr(xpon, AIROHA_EPON_LLID_KEY_CTRL, ctrl);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(airoha_epon_hw_enable_encrypt);
+
+/**
+ * airoha_epon_hw_get_llid_key_inuse - 查询哪些 LLID 已配置密钥
+ * @xpon: XPON 设备
+ *
+ * 原厂 eponGetLlidKeyInuse 读全局 g_llid_key_index 位图。
+ * 这里直接回读硬件 0x0058 的 LLID 字段判断。
+ *
+ * 返回位图，bit n 置位表示 LLID n 已有密钥。
+ */
+u8 airoha_epon_hw_get_llid_key_inuse(struct airoha_xpon *xpon)
+{
+	u32 v;
+	u8 map = 0;
+	unsigned int i;
+
+	if (!xpon->epon_base)
+		return 0;
+
+	/* 逐 LLID 探测：写入索引后回读是否保持 */
+	for (i = 0; i < 8; i++) {
+		epon_hw_wr(xpon, AIROHA_EPON_LLID_KEY_CTRL,
+			   FIELD_PREP(AIROHA_EPON_KEY_LLID, i));
+		v = epon_hw_rd(xpon, AIROHA_EPON_LLID_KEY_CTRL);
+		if (FIELD_GET(AIROHA_EPON_KEY_LLID, v) == i)
+			map |= BIT(i);
+	}
+
+	return map;
+}
+EXPORT_SYMBOL_GPL(airoha_epon_hw_get_llid_key_inuse);
+
+/* ------------------------------------------------------------------ */
+/* LLID 过滤（防用户私接与非法 ONU）                                    */
+/* 原厂 eponMacIoctl 里的 LLID 过滤配置                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * airoha_epon_hw_set_llid_filter - 配置 LLID 过滤
+ * @xpon:  XPON 设备
+ * @llid:  本 ONU 的 LLID
+ * @on:    true 表示只接收该 LLID 的下行帧
+ *
+ * EPON 下行广播，若不过滤 LLID，ONU 会收到同 PON 口下所有用户的
+ * 下行帧。国内运营商要求必须按 LLID 过滤，防止用户侧抓包。
+ *
+ * 寄存器 0x0058 的 [5:0] 同时承担「本机 LLID」语义。
+ */
+int airoha_epon_hw_set_llid_filter(struct airoha_xpon *xpon, u8 llid, bool on)
+{
+	u32 v;
+
+	if (!xpon->epon_base)
+		return -ENODEV;
+
+	if (llid > 7)
+		return -EINVAL;
+
+	v = epon_hw_rd(xpon, AIROHA_EPON_LLID_KEY_CTRL);
+	v &= ~AIROHA_EPON_KEY_LLID;
+	if (on)
+		v |= FIELD_PREP(AIROHA_EPON_KEY_LLID, llid);
+
+	epon_hw_wr(xpon, AIROHA_EPON_LLID_KEY_CTRL, v);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(airoha_epon_hw_set_llid_filter);
+
+/* ------------------------------------------------------------------ */
+/* LLID 相关配置（FEC / 使能掩码 / 门限）                              */
+/* 原厂 eponSetLlidFec @0x??（424B）→ 寄存器 0x0020/0x0024            */
+/*      eponMacSetLlidEnableMask（312B）                              */
+/*      eponSetLlidThrshldNum（268B）→ 寄存器 0x0068                  */
+/*      eponSetLlidQueThrod（244B）                                   */
+/* ------------------------------------------------------------------ */
+
+#define AIROHA_EPON_LLID_FEC_CTRL	0x0020
+#define AIROHA_EPON_LLID_FEC_STATUS	0x0024
+#define AIROHA_EPON_LLID_THRESHOLD	0x0068
+
+/**
+ * airoha_epon_hw_set_llid_fec - 配置 LLID 的 FEC
+ * @xpon:  XPON 设备
+ * @llid:  LLID 索引
+ * @on:    true 使能 FEC
+ *
+ * 原厂 eponSetLlidFec 操作 0x6020（控制）与 0x6024（状态）。
+ * FEC（前向纠错）在国内电信 EPON 是推荐开启的，
+ * 可提升长距离/高分光比下的误码容限。
+ */
+int airoha_epon_hw_set_llid_fec(struct airoha_xpon *xpon, u8 llid, bool on)
+{
+	u32 v;
+
+	if (!xpon->epon_base)
+		return -ENODEV;
+
+	if (llid > 7)
+		return -EINVAL;
+
+	v = epon_hw_rd(xpon, AIROHA_EPON_LLID_FEC_CTRL);
+	if (on)
+		v |= BIT(llid);
+	else
+		v &= ~BIT(llid);
+
+	epon_hw_wr(xpon, AIROHA_EPON_LLID_FEC_CTRL, v);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(airoha_epon_hw_set_llid_fec);
+
+/**
+ * airoha_epon_hw_set_llid_enable_mask - 设置 LLID 使能掩码
+ * @xpon: XPON 设备
+ * @mask: 位图，bit n 置位表示使能 LLID n
+ *
+ * 原厂 eponMacSetLlidEnableMask 直接写掩码寄存器。
+ */
+int airoha_epon_hw_set_llid_enable_mask(struct airoha_xpon *xpon, u8 mask)
+{
+	if (!xpon->epon_base)
+		return -ENODEV;
+
+	epon_hw_wr(xpon, AIROHA_EPON_LLID_KEY_CTRL,
+		   FIELD_PREP(AIROHA_EPON_KEY_LLID, mask & 0x3f));
+	return 0;
+}
+EXPORT_SYMBOL_GPL(airoha_epon_hw_set_llid_enable_mask);
+
+/**
+ * airoha_epon_hw_set_llid_threshold - 设置 LLID 门限数
+ * @xpon:  XPON 设备
+ * @value: 门限值
+ *
+ * 原厂 eponSetLlidThrshldNum 写 0x6068。
+ * 用于限制同时活跃的 LLID 数量，防止资源耗尽。
+ */
+int airoha_epon_hw_set_llid_threshold(struct airoha_xpon *xpon, u32 value)
+{
+	if (!xpon->epon_base)
+		return -ENODEV;
+
+	epon_hw_wr(xpon, AIROHA_EPON_LLID_THRESHOLD, value);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(airoha_epon_hw_set_llid_threshold);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Airoha xPON EPON register initialization sequence");
