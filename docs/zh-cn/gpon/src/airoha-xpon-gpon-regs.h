@@ -77,6 +77,21 @@
 #define AIROHA_GPON_SUPERFRAME_COUNTER                       0x4358
 #define AIROHA_GPON_SUPERFRAME_MASK                          0x3fffffff
 
+/* DBA 微调修正值寄存器（原厂 0x4350 / 0x4354，减 0x4000 后）
+ * 0x0350: [15:0]=GREEN 修正, [31:16]=YELLOW 修正
+ * 0x0354: TOTAL 修正
+ */
+/* TypeB 保护倒换的队列与通道映射寄存器（原厂 0x4094–0x40b8）
+ * 原厂 gpon_dev_typeB_restore 操作的 9 个寄存器
+ */
+#define AIROHA_GPON_QUEUE_MAP_BASE                           0x0094
+#define AIROHA_GPON_QUEUE_ENABLE                             0x00ac
+#define AIROHA_GPON_QUEUE_THRESHOLD                          0x00b8
+#define AIROHA_GPON_QUEUE_CTRL                               0x0048
+
+#define AIROHA_GPON_DBA_SLIGHT_MODIFY_0                      0x0350
+#define AIROHA_GPON_DBA_SLIGHT_MODIFY_1                      0x0354
+
 #define AIROHA_GPON_SCU_RSTCTRL1                              0x834
 #define AIROHA_GPON_SCU_PON_MAC_RESET                         BIT(31)
 

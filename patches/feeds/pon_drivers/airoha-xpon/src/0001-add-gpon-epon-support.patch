@@ -1,14 +1,15 @@
 diff --git a/airoha-xpon/src/Makefile b/airoha-xpon/src/Makefile
-index 44479aa..5a72e8b 100644
+index 44479aa..5e69f0e 100644
 --- a/airoha-xpon/src/Makefile
 +++ b/airoha-xpon/src/Makefile
-@@ -7,4 +7,5 @@ airoha-xpon-y := airoha-xpon-main.o airoha-xpon-identity.o \
+@@ -7,4 +7,6 @@ airoha-xpon-y := airoha-xpon-main.o airoha-xpon-identity.o \
  	airoha-xpon-netlink.o airoha-xpon-ploam.o airoha-xpon-crypto.o \
  	airoha-xpon-control.o airoha-xpon-diagnostics.o airoha-xpon-epon.o \
  	airoha-xpon-omci.o airoha-xpon-oam.o \
 -	airoha-xpon-leds.o
 +	airoha-xpon-leds.o \
-+	airoha-xpon-proto.o airoha-xpon-gpon.o airoha-xpon-epon-hw.o
++	airoha-xpon-proto.o airoha-xpon-gpon.o airoha-xpon-epon-hw.o \
++	airoha-xpon-stats.o
 diff --git a/airoha-xpon/src/airoha-xpon-epon-hw.c b/airoha-xpon/src/airoha-xpon-epon-hw.c
 new file mode 100644
 index 0000000..8693271
@@ -962,10 +963,10 @@ index 71414bc..c7d0b2f 100644
  #endif
 diff --git a/airoha-xpon/src/airoha-xpon-gpon-regs.h b/airoha-xpon/src/airoha-xpon-gpon-regs.h
 new file mode 100644
-index 0000000..259cd8c
+index 0000000..93b4f62
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon-regs.h
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,155 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Airoha AN7581 GPON MAC 寄存器定义
@@ -1045,6 +1046,21 @@ index 0000000..259cd8c
 +#define AIROHA_GPON_SUPERFRAME_COUNTER                       0x4358
 +#define AIROHA_GPON_SUPERFRAME_MASK                          0x3fffffff
 +
++/* DBA 微调修正值寄存器（原厂 0x4350 / 0x4354，减 0x4000 后）
++ * 0x0350: [15:0]=GREEN 修正, [31:16]=YELLOW 修正
++ * 0x0354: TOTAL 修正
++ */
++/* TypeB 保护倒换的队列与通道映射寄存器（原厂 0x4094–0x40b8）
++ * 原厂 gpon_dev_typeB_restore 操作的 9 个寄存器
++ */
++#define AIROHA_GPON_QUEUE_MAP_BASE                           0x0094
++#define AIROHA_GPON_QUEUE_ENABLE                             0x00ac
++#define AIROHA_GPON_QUEUE_THRESHOLD                          0x00b8
++#define AIROHA_GPON_QUEUE_CTRL                               0x0048
++
++#define AIROHA_GPON_DBA_SLIGHT_MODIFY_0                      0x0350
++#define AIROHA_GPON_DBA_SLIGHT_MODIFY_1                      0x0354
++
 +#define AIROHA_GPON_SCU_RSTCTRL1                              0x834
 +#define AIROHA_GPON_SCU_PON_MAC_RESET                         BIT(31)
 +
@@ -1108,10 +1124,10 @@ index 0000000..259cd8c
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..3f86754
+index 0000000..b8d4f4b
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,2602 @@
+@@ -0,0 +1,3521 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1337,6 +1353,21 @@ index 0000000..3f86754
 +	u32	max;		/* 最大带宽 */
 +};
 +
++/* 告警环形缓冲深度 */
++#define AIROHA_GPON_EMERGENCE_MAX	16
++
++/**
++ * struct airoha_gpon_emergence - 一条告警记录
++ *
++ * 原厂 gpon_record_emergence_info / gpon_show_emergence_info
++ * 用环形缓冲记录最近告警，供掉线排查与运营商远程诊断。
++ */
++struct airoha_gpon_emergence {
++	u32	code;		/* 告警码 */
++	u32	param;		/* 附加参数 */
++	u64	ts_ns;		/* 时间戳 */
++};
++
 +struct airoha_gpon_priv {
 +	u32			to1_retry_cnt;		/* +0x00 */
 +	u32			state;			/* +0x04 当前 O1–O7 */
@@ -1371,6 +1402,19 @@ index 0000000..3f86754
 +	u32			qdma_tx_buff_size;	/* +0x06 = 0xe0 */
 +	/* GPON AES-128 加密密钥（原厂 gponDevSetEncryptKey，16 字节） */
 +	u8			aes_key[16];
++	/* 国内移动 PLOAM Password（10 字符 ASCII，不足补 0） */
++	char			sn_passwd[10];
++	bool			sn_passwd_set;
++	/* TypeB 保护倒换的队列配置备份（原厂 gpon_dev_typeB_restore） */
++	u32			typeb_queue_map[8];
++	u32			typeb_queue_enable;
++	u32			typeb_queue_threshold;
++	u32			typeb_queue_ctrl;
++	bool			typeb_backup_valid;
++	/* 告警记录环形缓冲（原厂 gpon_record_emergence_info） */
++	struct airoha_gpon_emergence emergence[AIROHA_GPON_EMERGENCE_MAX];
++	u32			emergence_head;
++	u32			emergence_count;
 +	s32			hw_param_cache;		/* +0x24c，初值 -1 */
 +};
 +
@@ -1404,6 +1448,38 @@ index 0000000..3f86754
 +void airoha_xpon_gpon_init_qdma_tx_buff(struct airoha_xpon *xpon);
 +void airoha_xpon_gpon_set_encrypt_key(struct airoha_xpon *xpon,
 +				      const u8 key[16]);
++int airoha_xpon_gpon_set_shadow_key(struct airoha_xpon *xpon, const u8 key[16]);
++int airoha_xpon_gpon_aes_key_switch_by_sw(struct airoha_xpon *xpon);
++int airoha_xpon_gpon_set_key_switch_time(struct airoha_xpon *xpon, u32 superframe);
++int airoha_xpon_gpon_gem_mib_init(struct airoha_xpon *xpon);
++int airoha_xpon_gpon_get_gem_counter(struct airoha_xpon *xpon, u16 gem_port,
++				     u32 *rx_gem, u32 *tx_gem);
++int airoha_xpon_gpon_clear_gem_counter(struct airoha_xpon *xpon, u16 gem_port);
++int airoha_xpon_gpon_get_tcont_counter(struct airoha_xpon *xpon, u16 tcont,
++				       u32 *rx, u32 *tx);
++int airoha_xpon_gpon_get_error_status(struct airoha_xpon *xpon, u32 *grp0,
++				      u32 *grp1);
++void airoha_xpon_gpon_record_emergence(struct airoha_xpon *xpon, u32 code,
++				       u32 param);
++void airoha_xpon_gpon_show_emergence(struct airoha_xpon *xpon,
++				     struct seq_file *m);
++void airoha_xpon_gpon_set_dba_slight_modify(struct airoha_xpon *xpon, bool on);
++void airoha_xpon_gpon_set_dba_shift_modify(struct airoha_xpon *xpon, bool on);
++void airoha_xpon_gpon_set_dba_slight_value(struct airoha_xpon *xpon,
++					   u32 green, u32 total, u32 yellow);
++int airoha_xpon_gpon_typeb_reset(struct airoha_xpon *xpon, bool for_typeb);
++int airoha_xpon_gpon_typeb_restore(struct airoha_xpon *xpon);
++int airoha_xpon_gpon_typeb_backup(struct airoha_xpon *xpon);
++void airoha_xpon_gpon_dump_csr(struct airoha_xpon *xpon);
++void airoha_xpon_gpon_set_sniff(struct airoha_xpon *xpon, bool on);
++void airoha_xpon_gpon_dbg_err_check(struct airoha_xpon *xpon);
++/* 供 debugfs 统计层使用的访问器 */
++void airoha_xpon_gpon_dump_csr_seq(struct airoha_xpon *xpon, struct seq_file *m);
++u32 airoha_xpon_gpon_superframe_value(struct airoha_xpon *xpon);
++const char *airoha_xpon_gpon_sn_passwd(struct airoha_xpon *xpon);
++int airoha_xpon_gpon_set_sn_passwd(struct airoha_xpon *xpon, const char *pwd,
++				   size_t len);
++bool airoha_xpon_gpon_typeb_backup_valid(struct airoha_xpon *xpon);
 +int airoha_xpon_gpon_backup_gem(struct airoha_xpon *xpon,
 +				const struct airoha_gpon_recovery_gem *e);
 +int airoha_xpon_gpon_check_gem_exist(struct airoha_xpon *xpon, u16 gem_id);
@@ -3087,6 +3163,860 @@ index 0000000..3f86754
 +EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_encrypt_key);
 +
 +/**
++ * airoha_xpon_gpon_set_shadow_key - 写入影子密钥（预置，等待切换）
++ * @xpon: XPON 设备
++ * @key:  16 字节 AES-128 密钥
++ *
++ * 原厂 gponDevSetShadowKey @0x024034（200 字节）：
++ * 写入与主密钥相同的 4 个 shadow 寄存器（0x4074–0x4080），
++ * 但走的是"影子"路径——写入后不立即生效，
++ * 需调用 airoha_xpon_gpon_aes_key_switch_by_sw() 或等超帧计数到达才切换。
++ *
++ * 用途：运营商做无中断密钥轮换。先写影子，再选时机切换。
++ */
++int airoha_xpon_gpon_set_shadow_key(struct airoha_xpon *xpon, const u8 key[16])
++{
++	u32 w0, w1, w2, w3;
++
++	if (!xpon->gpon_base || !key)
++		return -ENODEV;
++
++	w0 = ((u32)key[0] << 24) | ((u32)key[1] << 16) |
++	     ((u32)key[2] << 8)  |  (u32)key[3];
++	w1 = ((u32)key[4] << 24) | ((u32)key[5] << 16) |
++	     ((u32)key[6] << 8)  |  (u32)key[7];
++	w2 = ((u32)key[8] << 24) | ((u32)key[9] << 16) |
++	     ((u32)key[10] << 8) |  (u32)key[11];
++	w3 = ((u32)key[12] << 24) | ((u32)key[13] << 16) |
++	     ((u32)key[14] << 8)  |  (u32)key[15];
++
++	gpon_wr(xpon, AIROHA_GPON_AES_KEY_SHADOW_REGISTER0, w3);
++	gpon_wr(xpon, AIROHA_GPON_AES_KEY_SHADOW_REGISTER1, w2);
++	gpon_wr(xpon, AIROHA_GPON_AES_KEY_SHADOW_REGISTER2, w1);
++	gpon_wr(xpon, AIROHA_GPON_AES_KEY_SHADOW_REGISTER3, w0);
++
++	dev_dbg(xpon->dev, "shadow key programmed\n");
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_shadow_key);
++
++/**
++ * airoha_xpon_gpon_aes_key_switch_by_sw - 软件触发 AES 密钥切换
++ * @xpon: XPON 设备
++ *
++ * 原厂 gponDevSetAesKeySwitchBySw @0x020258（236 字节）：
++ *
++ *   v = readl(0x4084);
++ *   writel(v | BIT(0), 0x4084);        // 置 bit0 触发切换
++ *   do {
++ *           udelay(...);
++ *           v = readl(0x4084);
++ *   } while (!(v & BIT(31)));          // 等 bit31 = 完成
++ *
++ * 返回 0 表示切换完成，-ETIMEDOUT 表示超时。
++ */
++int airoha_xpon_gpon_aes_key_switch_by_sw(struct airoha_xpon *xpon)
++{
++	u32 v;
++	int ret;
++
++	if (!xpon->gpon_base)
++		return -ENODEV;
++
++	/* 置 bit0 触发切换 */
++	gpon_rmw(xpon, AIROHA_GPON_AES_KEY_SWITCH_BY_SOFTWARE, BIT(0), BIT(0));
++
++	/* 等 bit31 置位表示硬件完成切换 */
++	ret = readl_poll_timeout_atomic(
++		xpon->gpon_base + AIROHA_GPON_AES_KEY_SWITCH_BY_SOFTWARE,
++		v, v & BIT(31), 10, 10000);
++	if (ret) {
++		dev_warn(xpon->dev, "aes key switch timeout\n");
++		return ret;
++	}
++
++	dev_dbg(xpon->dev, "aes key switched\n");
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_aes_key_switch_by_sw);
++
++/**
++ * airoha_xpon_gpon_set_key_switch_time - 设置基于超帧计数的密钥切换时间
++ * @xpon:      XPON 设备
++ * @superframe: 目标超帧号（低 30 位有效）
++ *
++ * 原厂 gponDevSetKeySwithTime @0x0240fc（212 字节）：
++ *
++ *   1. 若参数表示"立即切换"，调 gponDevSetAesKeySwitchBySw()
++ *   2. 否则写 0x4060 的低 30 位 = 目标超帧号
++ *      硬件在超帧计数到达时自动切换密钥
++ *
++ * 这是运营商做"定时无中断轮换"的标准方式：
++ * 提前算好切换超帧号，写进去，硬件自动在那一刻换。
++ */
++int airoha_xpon_gpon_set_key_switch_time(struct airoha_xpon *xpon,
++					 u32 superframe)
++{
++	u32 v;
++
++	if (!xpon->gpon_base)
++		return -ENODEV;
++
++	/* 低 30 位是超帧号，高 2 位保留 */
++	gpon_rmw(xpon, AIROHA_GPON_SUPER_FRAME_COUNTER_AES_KEY_CHANGE,
++		 AIROHA_GPON_SUPERFRAME_MASK, superframe & AIROHA_GPON_SUPERFRAME_MASK);
++
++	v = gpon_rd(xpon, AIROHA_GPON_SUPER_FRAME_COUNTER_AES_KEY_CHANGE);
++	dev_dbg(xpon->dev, "key switch at superframe %u\n",
++		v & AIROHA_GPON_SUPERFRAME_MASK);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_key_switch_time);
++
++/* ------------------------------------------------------------------ */
++/* GEM / T-CONT 统计计数器                                             */
++/* 原厂 gponDevGemMibTablesInit @0x1ede4（272B）                       */
++/*      gponDevGetGemPortCounter @0x1f408（52B）                       */
++/*      gponDevClearGemPortCounter @0x1f350（184B）                    */
++/* ------------------------------------------------------------------ */
++
++/* GEM Port 索引表访问控制位 */
++#define AIROHA_GPON_GEM_IDX_READ	BIT(16)
++#define AIROHA_GPON_GEM_IDX_CLEAR	BIT(17)
++#define AIROHA_GPON_GEM_IDX_BUSY	BIT(31)
++#define AIROHA_GPON_GEM_IDX_VALUE	GENMASK(15, 0)
++
++/**
++ * airoha_xpon_gpon_gem_mib_init - 初始化 GEM MIB 索引表
++ * @xpon: XPON 设备
++ *
++ * 原厂 gponDevGemMibTablesInit：
++ *   1. 写 MIB_TABLE_INITIALIZATION_CONTROL (0x0134) = 1
++ *   2. 写 GEM_PORT_INDEX_TABLE_INITIALIZATION_CONTROL (0x0148) = 1
++ *   3. 回读两个寄存器确认
++ *   4. udelay(0x8958) 等表初始化完成
++ *
++ * 必须在 gpon_enable 的 dev_init 之后、qos_init 之前调用，
++ * 否则 GEM 计数器读不出数据。
++ */
++int airoha_xpon_gpon_gem_mib_init(struct airoha_xpon *xpon)
++{
++	u32 v;
++
++	if (!xpon->gpon_base)
++		return -ENODEV;
++
++	gpon_wr(xpon, AIROHA_GPON_MIB_TABLE_INITIALIZATION_CONTROL, 1);
++	gpon_wr(xpon, AIROHA_GPON_GEM_PORT_INDEX_TABLE_INITIALIZATION_CONTROL, 1);
++
++	/* 回读确认（原厂也做回读，用于调试） */
++	v = gpon_rd(xpon, AIROHA_GPON_MIB_TABLE_INITIALIZATION_CONTROL);
++	if (!(v & 1))
++		dev_warn(xpon->dev, "MIB table init not acked\n");
++
++	/* 原厂延时 0x8958（约 35ms），等表初始化完成 */
++	udelay(0x8958);
++
++	dev_dbg(xpon->dev, "gem mib tables initialized\n");
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_gem_mib_init);
++
++/**
++ * airoha_xpon_gpon_get_gem_counter - 读取单个 GEM Port 的收发计数
++ * @xpon:     XPON 设备
++ * @gem_port: GEM Port ID
++ * @rx_gem:   输出，下行 GEM 帧计数（可为 NULL）
++ * @tx_gem:   输出，上行 GEM 帧计数（可为 NULL）
++ *
++ * 流程（原厂 gponDevGetGemPortCounter）：
++ *   1. 写 GEM_PORT_INDEX_TABLE_ACCESS_CONTROL_MIB (0x0140)
++ *      = gem_port | READ
++ *   2. 等 BUSY 位清零
++ *   3. 读 LOW_32 / HIGH_32 MIB_READ_DATA 拼成 64 位
++ *
++ * 计数器类型由 MIB_CONTROL_STATUS 的 COUNTER_TYPE 决定，
++ * 原厂通过 gponDevSetCounterType 切换（GEM 帧 / 字节）。
++ */
++int airoha_xpon_gpon_get_gem_counter(struct airoha_xpon *xpon, u16 gem_port,
++				     u32 *rx_gem, u32 *tx_gem)
++{
++	u32 ctrl, lo, hi;
++	u64 val;
++	int ret;
++
++	if (!xpon->gpon_base)
++		return -ENODEV;
++
++	ctrl = FIELD_PREP(AIROHA_GPON_GEM_IDX_VALUE, gem_port) |
++	       AIROHA_GPON_GEM_IDX_READ;
++	gpon_wr(xpon, AIROHA_GPON_GEM_PORT_INDEX_TABLE_ACCESS_CONTROL_MIB, ctrl);
++
++	ret = readl_poll_timeout_atomic(
++		xpon->gpon_base +
++			AIROHA_GPON_GEM_PORT_INDEX_TABLE_ACCESS_CONTROL_MIB,
++		ctrl, !(ctrl & AIROHA_GPON_GEM_IDX_BUSY), 10, 10000);
++	if (ret) {
++		dev_warn(xpon->dev, "gem counter read timeout (port %u)\n",
++			 gem_port);
++		return ret;
++	}
++
++	lo = gpon_rd(xpon, AIROHA_GPON_LOW_32_BITS_MIB_READ_DATA);
++	hi = gpon_rd(xpon, AIROHA_GPON_HIGH_32_BITS_MIB_READ_DATA);
++	val = ((u64)hi << 32) | lo;
++
++	/* 原厂把 64 位值截成 32 位返回 */
++	if (rx_gem)
++		*rx_gem = lower_32_bits(val);
++	if (tx_gem)
++		*tx_gem = upper_32_bits(val) ? upper_32_bits(val) : 0;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_get_gem_counter);
++
++/**
++ * airoha_xpon_gpon_clear_gem_counter - 清零单个 GEM Port 计数器
++ * @xpon:     XPON 设备
++ * @gem_port: GEM Port ID
++ *
++ * 原厂 gponDevClearGemPortCounter：写 CLEAR 位而不是 READ 位。
++ */
++int airoha_xpon_gpon_clear_gem_counter(struct airoha_xpon *xpon, u16 gem_port)
++{
++	u32 ctrl;
++	int ret;
++
++	if (!xpon->gpon_base)
++		return -ENODEV;
++
++	ctrl = FIELD_PREP(AIROHA_GPON_GEM_IDX_VALUE, gem_port) |
++	       AIROHA_GPON_GEM_IDX_CLEAR;
++	gpon_wr(xpon, AIROHA_GPON_GEM_PORT_INDEX_TABLE_ACCESS_CONTROL_MIB, ctrl);
++
++	ret = readl_poll_timeout_atomic(
++		xpon->gpon_base +
++			AIROHA_GPON_GEM_PORT_INDEX_TABLE_ACCESS_CONTROL_MIB,
++		ctrl, !(ctrl & AIROHA_GPON_GEM_IDX_BUSY), 10, 10000);
++
++	return ret;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_clear_gem_counter);
++
++/**
++ * airoha_xpon_gpon_get_tcont_counter - 读取 T-CONT 计数器
++ * @xpon:  XPON 设备
++ * @tcont: T-CONT 编号 0..31
++ * @rx:    输出，下行计数
++ * @tx:    输出，上行计数
++ *
++ * 原厂 xmcs_get_tcont_counter 通过 get_counter_from_reg 读取，
++ * 内部先查 gem_port_info 找到该 T-CONT 绑定的 GEM Port，
++ * 再读 GEM 计数器。这里简化：直接按 T-CONT 编号映射到索引。
++ *
++ * 注意：原厂对 tcont > 0xfff 直接返回 -1，这里照做。
++ */
++int airoha_xpon_gpon_get_tcont_counter(struct airoha_xpon *xpon, u16 tcont,
++				       u32 *rx, u32 *tx)
++{
++	if (!xpon->gpon_base)
++		return -ENODEV;
++
++	if (tcont > AIROHA_GPON_TCONT_MAX)
++		return -EINVAL;
++
++	/*
++	 * T-CONT 计数器本质上是该 T-CONT 下所有 GEM Port 计数之和。
++	 * 上游没有 gem_port_info 表，这里按 1:1 映射（T-CONT n → GEM n）。
++	 * 若后续接入 OMCI 的 T-CONT/GEM 绑定表，改为遍历求和。
++	 */
++	return airoha_xpon_gpon_get_gem_counter(xpon, tcont, rx, tx);
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_get_tcont_counter);
++
++/* ------------------------------------------------------------------ */
++/* 错误状态与告警记录                                                  */
++/* 原厂 gpon_dev_get_error_status @0x08a1c（744B）                     */
++/*      gpon_record_emergence_info @0x??（420B）                       */
++/*      gpon_show_emergence_info @0x??（504B）                         */
++/* ------------------------------------------------------------------ */
++
++/**
++ * airoha_xpon_gpon_get_error_status - 读取硬件错误状态
++ * @xpon: XPON 设备
++ * @grp0: 输出，DEBUG_SIGNAL_GROUP_0 (0x0228)
++ * @grp1: 输出，DEBUG_SIGNAL_GROUP_1 (0x022c)
++ *
++ * 原厂 gponDevGetErrStatus @0x025ab4（132 字节）：
++ *   读 0x4228 和 0x422c 两个调试信号组寄存器。
++ *
++ * 原厂 gpon_dev_get_error_status 在此基础上对每一位做 ubfx + printk，
++ * 逐位打印错误标志。这里改为：
++ *   1. 返回原始值供上层判断
++ *   2. 由 airoha_xpon_gpon_debug_mac 按需格式化输出
++ *
++ * 这样避免了原厂 20 多次 printk 的性能问题，同时保留全部信息。
++ */
++int airoha_xpon_gpon_get_error_status(struct airoha_xpon *xpon, u32 *grp0,
++				      u32 *grp1)
++{
++	if (!xpon->gpon_base)
++		return -ENODEV;
++
++	if (grp0)
++		*grp0 = gpon_rd(xpon, AIROHA_GPON_DEBUG_SIGNAL_GROUP_0);
++	if (grp1)
++		*grp1 = gpon_rd(xpon, AIROHA_GPON_DEBUG_SIGNAL_GROUP_1);
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_get_error_status);
++
++/**
++ * airoha_xpon_gpon_record_emergence - 记录一条告警
++ * @xpon:  XPON 设备
++ * @code:  告警码
++ * @param: 附加参数
++ *
++ * 原厂 gpon_record_emergence_info 用环形缓冲记录最近告警，
++ * 供 gpon_show_emergence_info 输出。用途：
++ *   - 掉线后排查（记录掉线前后的状态序列）
++ *   - TypeB 倒换记录
++ *   - 运营商远程诊断
++ *
++ * 这里用固定 16 条环形缓冲，避免动态分配。
++ */
++void airoha_xpon_gpon_record_emergence(struct airoha_xpon *xpon, u32 code,
++				       u32 param)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++	struct airoha_gpon_emergence *e;
++
++	if (!priv)
++		return;
++
++	e = &priv->emergence[priv->emergence_head % AIROHA_GPON_EMERGENCE_MAX];
++	e->code = code;
++	e->param = param;
++	e->ts_ns = ktime_get_ns();
++
++	priv->emergence_head++;
++	if (priv->emergence_count < AIROHA_GPON_EMERGENCE_MAX)
++		priv->emergence_count++;
++
++	dev_dbg(xpon->dev, "emergence 0x%x param 0x%x\n", code, param);
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_record_emergence);
++
++/**
++ * airoha_xpon_gpon_show_emergence - 输出告警历史
++ * @xpon: XPON 设备
++ * @m:    seq_file
++ *
++ * 原厂 gpon_show_emergence_info 的等价实现，按时间顺序输出最近告警。
++ */
++void airoha_xpon_gpon_show_emergence(struct airoha_xpon *xpon,
++				     struct seq_file *m)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++	unsigned int i, start, n;
++
++	if (!priv)
++		return;
++
++	n = priv->emergence_count;
++	start = (priv->emergence_head >= n) ?
++		priv->emergence_head - n : 0;
++
++	seq_printf(m, "\nemergence log (%u entries):\n", n);
++	seq_puts(m, "  idx      code     param        time\n");
++
++	for (i = 0; i < n; i++) {
++		struct airoha_gpon_emergence *e =
++			&priv->emergence[(start + i) % AIROHA_GPON_EMERGENCE_MAX];
++
++		seq_printf(m, "  %3u  0x%08x 0x%08x  %llu ns\n",
++			   i, e->code, e->param, e->ts_ns);
++	}
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_show_emergence);
++
++/* ------------------------------------------------------------------ */
++/* DBA 微调                                                            */
++/* 原厂 gponDevSetDbaSlightModify @0x20774（148B）                     */
++/*      gponDevSetDbaShiftModify  @0x209dc（148B）                     */
++/*      gponDevSetDbaSlightModifyGreen/Total/Yellow                    */
++/* ------------------------------------------------------------------ */
++
++/*
++ * DBA_BACK_DOOR_SW (0x4340) 的位定义（从 bfi 指令偏移反推）：
++ *   bit27  SLIGHT_MODIFY   允许小幅修正 DBA 门限
++ *   bit23  SHIFT_MODIFY    允许移位修正（对门限做 ±N 偏移）
++ *
++ * DBA 微调参数寄存器（字节偏移，0x4350 起）：
++ *   0x4350  低 16 位 = GREEN 修正值，高 16 位 = YELLOW 修正值
++ *   0x4354  TOTAL 修正值
++ */
++
++/**
++ * airoha_xpon_gpon_set_dba_slight_modify - 使能/禁用 DBA 小幅修正
++ * @xpon: XPON 设备
++ * @on:   true 使能
++ *
++ * 原厂：读 0x4340，取 bit27 写入 on，写回。
++ */
++void airoha_xpon_gpon_set_dba_slight_modify(struct airoha_xpon *xpon, bool on)
++{
++	if (!xpon->gpon_base)
++		return;
++
++	gpon_rmw(xpon, AIROHA_GPON_DBA_BACK_DOOR_SW, BIT(27),
++		 on ? BIT(27) : 0);
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_dba_slight_modify);
++
++/**
++ * airoha_xpon_gpon_set_dba_shift_modify - 使能/禁用 DBA 移位修正
++ * @xpon: XPON 设备
++ * @on:   true 使能
++ *
++ * 原厂：读 0x4340，取 bit23 写入 on，写回。
++ */
++void airoha_xpon_gpon_set_dba_shift_modify(struct airoha_xpon *xpon, bool on)
++{
++	if (!xpon->gpon_base)
++		return;
++
++	gpon_rmw(xpon, AIROHA_GPON_DBA_BACK_DOOR_SW, BIT(23),
++		 on ? BIT(23) : 0);
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_dba_shift_modify);
++
++/**
++ * airoha_xpon_gpon_set_dba_slight_value - 设置 DBA 微调修正值
++ * @xpon:   XPON 设备
++ * @green:  GREEN 修正值（写入 0x4350 低 16 位）
++ * @total:  TOTAL 修正值（写入 0x4354）
++ * @yellow: YELLOW 修正值（写入 0x4350 高 16 位）
++ *
++ * 原厂三个独立函数分别写这三个字段，这里合并成一个接口，
++ * 避免三次读改写同一寄存器。
++ */
++void airoha_xpon_gpon_set_dba_slight_value(struct airoha_xpon *xpon,
++					   u32 green, u32 total, u32 yellow)
++{
++	u32 v;
++
++	if (!xpon->gpon_base)
++		return;
++
++	/* 0x4350: [15:0]=green, [31:16]=yellow */
++	v = (green & 0xffff) | ((yellow & 0xffff) << 16);
++	gpon_wr(xpon, AIROHA_GPON_DBA_SLIGHT_MODIFY_0, v);
++
++	/* 0x4354: total */
++	gpon_wr(xpon, AIROHA_GPON_DBA_SLIGHT_MODIFY_1, total & 0xffff);
++
++	dev_dbg(xpon->dev, "dba slight: green=%u total=%u yellow=%u\n",
++		green, total, yellow);
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_dba_slight_value);
++
++/* ------------------------------------------------------------------ */
++/* TypeB 保护倒换                                                      */
++/* 原厂 gpon_typeb_dev_reset @0x1a824（332B）                          */
++/*      gpon_typeb_dev_reset_for_typeB @0x25b98（1176B）               */
++/*      gpon_dev_typeB_restore @0x2559c（760B）                        */
++/* ------------------------------------------------------------------ */
++
++/**
++ * airoha_xpon_gpon_typeb_reset - TypeB 保护倒换时的设备复位
++ * @xpon:     XPON 设备
++ * @for_typeb: true 表示走 TypeB 专用路径（配置更完整）
++ *
++ * 原厂两个函数的关系：
++ *   gpon_typeb_dev_reset           → 简版，只做状态机 + 复位 + 重初始化
++ *   gpon_typeb_dev_reset_for_typeB → 完整版，额外配置 0x0160 通道寄存器
++ *
++ * 共同步骤（从调用序列还原）：
++ *   1. xpon_mac_print_open      打印调试头
++ *   2. gpon_act_change_gpon_state  状态机切到 O1
++ *   3. gpon_record_emergence_info  记录告警（TypeB 事件）
++ *   4. gponDevResetCtrl            复位 MAC
++ *   5. gpPhyData 相关              PHY 侧配置
++ *   6. mod_timer                   重启 TO1 定时器
++ *   7. gpon_dev_init               重新初始化
++ *   8. gpon_qos_init               重建 DBA
++ *
++ * TypeB 场景：OLT 侧主备口切换后，ONU 需要快速重新注册。
++ * 与普通掉线恢复的区别是：保留业务配置（GEM/Alloc-ID），只重建物理链路。
++ */
++int airoha_xpon_gpon_typeb_reset(struct airoha_xpon *xpon, bool for_typeb)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++	int ret;
++
++	if (!xpon->gpon_base || !priv)
++		return -ENODEV;
++
++	dev_info(xpon->dev, "typeB reset (full=%d)\n", for_typeb);
++
++	/* 1. 记录告警（TypeB 事件码 0x54） */
++	airoha_xpon_gpon_record_emergence(xpon, 0x54, for_typeb ? 1 : 0);
++
++	/* 2. 状态机退回 O1，准备重新注册 */
++	airoha_xpon_gpon_set_state(xpon, AIROHA_GPON_O1_INITIAL);
++
++	/* 3. MAC 复位 */
++	ret = airoha_xpon_gpon_reset_ctrl(xpon, true);
++	if (ret)
++		return ret;
++
++	/*
++	 * 4. TypeB 专用：配置 0x0160 通道寄存器
++	 *    原厂 typeb_dev_reset_for_typeB 里对 0x4160 做读改写，
++	 *    用于切换主备通道。
++	 */
++	if (for_typeb) {
++		u32 v = gpon_rd(xpon, 0x0160);
++
++		v ^= BIT(0);	/* 翻转通道选择位 */
++		gpon_wr(xpon, 0x0160, v);
++		dev_dbg(xpon->dev, "typeB channel toggled, 0x0160=0x%08x\n", v);
++	}
++
++	/* 5. 重新初始化（含 349 条表 / dev_init / qos） */
++	ret = airoha_xpon_gpon_dev_init(xpon);
++	if (ret)
++		return ret;
++
++	ret = airoha_xpon_gpon_qos_init(xpon);
++	if (ret)
++		return ret;
++
++	/* 6. 重启 TO1 定时器等重新注册 */
++	if (priv->to1_ms)
++		mod_timer(&priv->to1_timer,
++			  jiffies + msecs_to_jiffies(priv->to1_ms));
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_typeb_reset);
++
++/**
++ * airoha_xpon_gpon_typeb_restore - TypeB 倒换后恢复业务配置
++ * @xpon: XPON 设备
++ *
++ * 原厂 gpon_dev_typeB_restore @0x2559c（760 字节）：
++ * 操作 0x0004 / 0x0048 / 0x0094 / 0x0098 / 0x009c / 0x00a0 /
++ *      0x00a4 / 0x00ac / 0x00b8 这 9 个寄存器。
++ *
++ * 这些是**队列与通道映射**寄存器：
++ *   0x0094–0x00a4  8 个队列的通道映射（每个队列一个 u32）
++ *   0x00ac/0x00b8  队列使能与门限
++ *   0x0048         队列总控
++ *   0x0004         全局配置补充
++ *
++ * 恢复逻辑：主备切换后，把备份的队列配置重新写入硬件。
++ * 原厂从 gpGponPriv 里读取备份值，这里从 priv->typeb_backup 读。
++ */
++int airoha_xpon_gpon_typeb_restore(struct airoha_xpon *xpon)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++	int i;
++
++	if (!xpon->gpon_base || !priv)
++		return -ENODEV;
++
++	if (!priv->typeb_backup_valid) {
++		dev_warn(xpon->dev, "typeB restore: no backup config\n");
++		return -ENOENT;
++	}
++
++	/* 恢复 8 个队列的通道映射 */
++	for (i = 0; i < 8; i++) {
++		if (priv->typeb_queue_map[i])
++			gpon_wr(xpon, AIROHA_GPON_QUEUE_MAP_BASE + i * 4,
++				priv->typeb_queue_map[i]);
++	}
++
++	/* 恢复队列使能与门限 */
++	gpon_wr(xpon, AIROHA_GPON_QUEUE_ENABLE, priv->typeb_queue_enable);
++	gpon_wr(xpon, AIROHA_GPON_QUEUE_THRESHOLD, priv->typeb_queue_threshold);
++	gpon_wr(xpon, AIROHA_GPON_QUEUE_CTRL, priv->typeb_queue_ctrl);
++
++	dev_info(xpon->dev, "typeB config restored\n");
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_typeb_restore);
++
++/**
++ * airoha_xpon_gpon_typeb_backup - 备份当前队列配置（供 restore 用）
++ * @xpon: XPON 设备
++ *
++ * 原厂在正常运行时把队列配置存到 gpGponPriv，倒换后恢复。
++ * 本函数在 enable 成功后调用。
++ */
++int airoha_xpon_gpon_typeb_backup(struct airoha_xpon *xpon)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++	int i;
++
++	if (!xpon->gpon_base || !priv)
++		return -ENODEV;
++
++	for (i = 0; i < 8; i++)
++		priv->typeb_queue_map[i] =
++			gpon_rd(xpon, AIROHA_GPON_QUEUE_MAP_BASE + i * 4);
++
++	priv->typeb_queue_enable = gpon_rd(xpon, AIROHA_GPON_QUEUE_ENABLE);
++	priv->typeb_queue_threshold = gpon_rd(xpon, AIROHA_GPON_QUEUE_THRESHOLD);
++	priv->typeb_queue_ctrl = gpon_rd(xpon, AIROHA_GPON_QUEUE_CTRL);
++	priv->typeb_backup_valid = true;
++
++	dev_dbg(xpon->dev, "typeB config backed up\n");
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_typeb_backup);
++
++/* ------------------------------------------------------------------ */
++/* 调试 / DVT                                                          */
++/* 原厂 gponDevDumpCsr @0x22a28（4452B，dump 109 个寄存器）            */
++/*      gponDevSetSniffMode（1820B）                                   */
++/*      gpon_dbg_grp_err_check（1452B）                                */
++/* ------------------------------------------------------------------ */
++
++/**
++ * airoha_xpon_gpon_dump_csr - 导出 GPON MAC 全部关键寄存器
++ * @xpon: XPON 设备
++ *
++ * 原厂 gponDevDumpCsr 用 110 次 get_xpon_data + 110 次 printk
++ * 逐个打印 0x4004–0x43c8 区间的寄存器。
++ *
++ * 这里改为通过 dev_dbg 输出（受 dynamic_debug 控制），
++ * 覆盖相同的偏移范围。生产环境不开 debug 时零开销。
++ *
++ * 偏移列表来自原厂反汇编提取的 109 个值。
++ */
++void airoha_xpon_gpon_dump_csr(struct airoha_xpon *xpon)
++{
++	static const u16 dump_offsets[] = {
++		0x004, 0x008, 0x00c, 0x010, 0x014, 0x018, 0x01c, 0x020,
++		0x024, 0x028, 0x02c, 0x030, 0x034, 0x038, 0x03c, 0x040,
++		0x044, 0x048, 0x050, 0x054, 0x058, 0x05c, 0x060, 0x064,
++		0x068, 0x06c, 0x080, 0x084, 0x088, 0x08c, 0x090, 0x094,
++		0x098, 0x09c, 0x0a0, 0x0a4, 0x0b0, 0x0b4, 0x0b8, 0x0bc,
++		0x0c0, 0x0c4, 0x0d0, 0x0d4, 0x0d8, 0x0dc, 0x0e0, 0x0e4,
++		0x0e8, 0x0ec, 0x0f0, 0x0f4, 0x0f8, 0x100, 0x104, 0x108,
++		0x10c, 0x110, 0x114, 0x118, 0x11c, 0x120, 0x124, 0x128,
++		0x12c, 0x130, 0x134, 0x138, 0x13c, 0x140, 0x144, 0x148,
++		0x14c, 0x150, 0x154, 0x160, 0x164, 0x168, 0x16c, 0x170,
++		0x174, 0x178, 0x17c, 0x180, 0x184, 0x188, 0x18c, 0x190,
++		0x194, 0x198, 0x19c, 0x1a0, 0x1a4, 0x1a8, 0x1ac, 0x1b0,
++		0x1b4, 0x1b8, 0x1bc, 0x1c0, 0x1c4, 0x1c8, 0x1cc, 0x1d0,
++		0x1d4, 0x1d8, 0x1dc, 0x1e0, 0x1e4, 0x1e8, 0x1ec,
++	};
++	unsigned int i;
++
++	if (!xpon->gpon_base)
++		return;
++
++	dev_dbg(xpon->dev, "=== GPON MAC CSR dump ===\n");
++	for (i = 0; i < ARRAY_SIZE(dump_offsets); i++)
++		dev_dbg(xpon->dev, "  0x%03x = 0x%08x\n",
++			dump_offsets[i], gpon_rd(xpon, dump_offsets[i]));
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_dump_csr);
++
++/**
++ * airoha_xpon_gpon_set_sniff - 使能/禁用嗅探模式
++ * @xpon: XPON 设备
++ * @on:   true 使能
++ *
++ * 原厂 gponDevSetSniffMode @0x1a6b4（1820 字节）：
++ * 配置 SNIFF_DBG_REG (0x00a8) 的位域，用于抓取
++ * 上行/下行的 PLOAM 与 GEM 帧到调试通道。
++ *
++ * 位定义（从反汇编的 and/orr 立即数反推）：
++ *   bit0      SNIFF_EN        总开关
++ *   bit4      SNIFF_PLOAM     抓 PLOAM
++ *   bit8      SNIFF_GEM       抓 GEM
++ *   bit12     SNIFF_UP        抓上行
++ *   bit16     SNIFF_DOWN      抓下行
++ */
++void airoha_xpon_gpon_set_sniff(struct airoha_xpon *xpon, bool on)
++{
++	u32 val = 0;
++
++	if (!xpon->gpon_base)
++		return;
++
++	if (on)
++		val = BIT(0) | BIT(4) | BIT(8) | BIT(12) | BIT(16);
++
++	gpon_wr(xpon, AIROHA_GPON_SNIFF_DBG_REG, val);
++	dev_dbg(xpon->dev, "sniff %s\n", on ? "on" : "off");
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_sniff);
++
++/**
++ * airoha_xpon_gpon_dbg_err_check - 检查并打印错误标志
++ * @xpon: XPON 设备
++ *
++ * 原厂 gpon_dbg_grp_err_check @0x??（1452 字节）：
++ * 读 DEBUG_SIGNAL_GROUP_0/1，对每个错误位做判定并打印。
++ *
++ * 这是 gpon_dev_get_error_status 的加强版：
++ *   前者只返回原始值，本函数按位解释并输出可读信息。
++ */
++void airoha_xpon_gpon_dbg_err_check(struct airoha_xpon *xpon)
++{
++	static const char *const grp0_names[] = {
++		"rx_gem_hdr_err",	"rx_gem_crc_err",
++		"rx_ploam_crc_err",	"rx_bwmap_err",
++		"tx_overrun",		"rx_overrun",
++		"sync_loss",		"lof",
++		"los",			"fec_uncorrectable",
++		"fec_corrected",	"onu_id_mismatch",
++		"sn_mismatch",		"reg_id_mismatch",
++		"dying_gasp_sent",	"tx_disable",
++	};
++	u32 grp0 = 0, grp1 = 0;
++	unsigned int i;
++
++	if (airoha_xpon_gpon_get_error_status(xpon, &grp0, &grp1))
++		return;
++
++	dev_dbg(xpon->dev, "=== GPON error check ===\n");
++	dev_dbg(xpon->dev, "  grp0 = 0x%08x, grp1 = 0x%08x\n", grp0, grp1);
++
++	for (i = 0; i < ARRAY_SIZE(grp0_names); i++) {
++		if (grp0 & BIT(i))
++			dev_dbg(xpon->dev, "  [ERR] %s\n", grp0_names[i]);
++	}
++
++	if (grp1)
++		dev_dbg(xpon->dev, "  grp1 raw bits: 0x%08x\n", grp1);
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_dbg_err_check);
++
++/* ------------------------------------------------------------------ */
++/* 供 debugfs 统计层使用的访问器                                       */
++/* ------------------------------------------------------------------ */
++
++/**
++ * airoha_xpon_gpon_dump_csr_seq - 以 seq_file 方式导出全部寄存器
++ * @xpon: XPON 设备
++ * @m:    seq_file
++ *
++ * 与 dump_csr 相同的偏移列表，但输出到 seq_file（debugfs 用）。
++ */
++void airoha_xpon_gpon_dump_csr_seq(struct airoha_xpon *xpon, struct seq_file *m)
++{
++	static const u16 dump_offsets[] = {
++		0x004, 0x008, 0x00c, 0x010, 0x014, 0x018, 0x01c, 0x020,
++		0x024, 0x028, 0x02c, 0x030, 0x034, 0x038, 0x03c, 0x040,
++		0x044, 0x048, 0x050, 0x054, 0x058, 0x05c, 0x060, 0x064,
++		0x068, 0x06c, 0x080, 0x084, 0x088, 0x08c, 0x090, 0x094,
++		0x098, 0x09c, 0x0a0, 0x0a4, 0x0b0, 0x0b4, 0x0b8, 0x0bc,
++		0x0c0, 0x0c4, 0x0d0, 0x0d4, 0x0d8, 0x0dc, 0x0e0, 0x0e4,
++		0x0e8, 0x0ec, 0x0f0, 0x0f4, 0x0f8, 0x100, 0x104, 0x108,
++		0x10c, 0x110, 0x114, 0x118, 0x11c, 0x120, 0x124, 0x128,
++		0x12c, 0x130, 0x134, 0x138, 0x13c, 0x140, 0x144, 0x148,
++		0x14c, 0x150, 0x154, 0x160, 0x164, 0x168, 0x16c, 0x170,
++		0x174, 0x178, 0x17c, 0x180, 0x184, 0x188, 0x18c, 0x190,
++		0x194, 0x198, 0x19c, 0x1a0, 0x1a4, 0x1a8, 0x1ac, 0x1b0,
++		0x1b4, 0x1b8, 0x1bc, 0x1c0, 0x1c4, 0x1c8, 0x1cc, 0x1d0,
++		0x1d4, 0x1d8, 0x1dc, 0x1e0, 0x1e4, 0x1e8, 0x1ec,
++	};
++	unsigned int i;
++
++	if (!xpon->gpon_base)
++		return;
++
++	seq_puts(m, "=== GPON MAC CSR dump ===\n");
++	seq_puts(m, "  offset      value\n");
++	for (i = 0; i < ARRAY_SIZE(dump_offsets); i++)
++		seq_printf(m, "  0x%03x  0x%08x\n",
++			   dump_offsets[i], gpon_rd(xpon, dump_offsets[i]));
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_dump_csr_seq);
++
++/**
++ * airoha_xpon_gpon_superframe_value - 取缓存的超帧值
++ * @xpon: XPON 设备
++ *
++ * get_superframe() 会把读到的值存进 priv->superframe，
++ * 本函数供 debugfs 层读取（避免重复读硬件）。
++ */
++u32 airoha_xpon_gpon_superframe_value(struct airoha_xpon *xpon)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++
++	return priv ? priv->superframe : 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_superframe_value);
++
++/**
++ * airoha_xpon_gpon_sn_passwd - 取已配置的 SN 密码
++ * @xpon: XPON 设备
++ *
++ * 返回 NULL 表示未配置。
++ */
++const char *airoha_xpon_gpon_sn_passwd(struct airoha_xpon *xpon)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++
++	if (!priv || !priv->sn_passwd_set)
++		return NULL;
++
++	return priv->sn_passwd;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_sn_passwd);
++
++/**
++ * airoha_xpon_gpon_set_sn_passwd - 设置 SN 密码
++ * @xpon: XPON 设备
++ * @pwd:  密码字符串（ASCII）
++ * @len:  长度，最多 10
++ *
++ * 国内移动运营商用 PLOAM Password 认证，固定 10 字符，
++ * 不足补 0。这个值会通过 PLOAMu 消息上报给 OLT。
++ */
++int airoha_xpon_gpon_set_sn_passwd(struct airoha_xpon *xpon, const char *pwd,
++				   size_t len)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++
++	if (!priv)
++		return -ENODEV;
++
++	if (!pwd || len > 10)
++		return -EINVAL;
++
++	memset(priv->sn_passwd, 0, sizeof(priv->sn_passwd));
++	memcpy(priv->sn_passwd, pwd, len);
++	priv->sn_passwd_set = true;
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_sn_passwd);
++
++/**
++ * airoha_xpon_gpon_typeb_backup_valid - 查询 TypeB 备份是否有效
++ * @xpon: XPON 设备
++ */
++bool airoha_xpon_gpon_typeb_backup_valid(struct airoha_xpon *xpon)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++
++	return priv && priv->typeb_backup_valid;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_typeb_backup_valid);
++
++/**
 + * airoha_xpon_gpon_init_qdma_tx_buff - 初始化 QDMA 发送缓冲
 + * @xpon: XPON 设备
 + *
@@ -3465,7 +4395,12 @@ index 0000000..3f86754
 +	if (ret)
 +		return ret;
 +
-+	/* 5. DBA 初始化 */
++	/* 5. GEM MIB 表初始化（必须在 QoS 之前，否则计数器读不出） */
++	ret = airoha_xpon_gpon_gem_mib_init(xpon);
++	if (ret)
++		return ret;
++
++	/* 6. DBA 初始化 */
 +	ret = airoha_xpon_gpon_qos_init(xpon);
 +	if (ret)
 +		return ret;
@@ -4453,3 +5388,593 @@ index 0000000..ee6492b
 +}
 +
 +#endif /* _AIROHA_XPON_PROTO_H_ */
+diff --git a/airoha-xpon/src/airoha-xpon-stats.c b/airoha-xpon/src/airoha-xpon-stats.c
+new file mode 100644
+index 0000000..ec2f0be
+--- /dev/null
++++ b/airoha-xpon/src/airoha-xpon-stats.c
+@@ -0,0 +1,584 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Airoha AN7581 xPON —— 统计查询接口（debugfs）
++ *
++ * 目标位置：openwrt-pon-drivers/airoha-xpon/src/airoha-xpon-stats.c
++ *
++ * ============================================================
++ * 为什么用 debugfs 而不是原厂的 ioctl
++ * ============================================================
++ *
++ * 原厂 xpon.ko 用 ioctl（type=0xd9，nr 1–110）暴露统计查询，
++ * 由 gpon_cmd_proc（26756 字节）统一分发。反汇编确认它的
++ * 8 个真实功能全是统计查询：
++ *   xmcs_get_onu_info / get_gem_counter / get_tcont_counter
++ *   xmcs_set_sn_passwd / gponDevGetSuperframe / clear 计数器
++ *
++ * 本实现选 debugfs，理由：
++ *   1. ioctl 需要新增字符设备或 netdev 钩子，侵入性大
++ *   2. 上游 netlink family 是 static，无法从外部追加 ops
++ *   3. debugfs 与上游 debug_mac（seq_file）风格一致
++ *   4. 用户态直接 cat 即可，无需额外工具
++ *
++ * ============================================================
++ * 文件布局（/sys/kernel/debug/airoha-xpon/<ifname>/）
++ * ============================================================
++ *
++ *   gem_stats    所有 GEM Port 收发计数
++ *   tcont_stats  所有 T-CONT 计数
++ *   onu_info     ONU 综合信息（超帧/错误组/告警历史）
++ *   sn_passwd    读写 SN 密码（国内移动 PLOAM Password）
++ *   dba_tuning   读写 DBA 微调参数
++ *   typeb        TypeB 保护状态与手动触发
++ *   dump_csr     导出全部关键寄存器
++ */
++
++#include <linux/debugfs.h>
++#include <linux/fs.h>
++#include <linux/module.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++
++#include "airoha-xpon-private.h"
++#include "airoha-xpon-proto.h"
++#include "airoha-xpon-gpon.h"
++
++#define AIROHA_XPON_STATS_DIR	"airoha-xpon"
++#define AIROHA_XPON_STATS_MAX	8
++
++/*
++ * 实例注册表：把 xpon 指针与它的 debugfs 目录关联起来。
++ *
++ * 不改上游 struct airoha_xpon（避免侵入），用固定大小数组。
++ * 单板最多 1–2 个 PON 实例，8 个足够。
++ */
++struct airoha_xpon_stats_entry {
++	struct airoha_xpon	*xpon;
++	struct dentry		*dir;
++};
++
++static struct airoha_xpon_stats_entry airoha_xpon_stats_entries[AIROHA_XPON_STATS_MAX];
++static DEFINE_MUTEX(airoha_xpon_stats_lock);
++static struct dentry *airoha_xpon_stats_root;
++
++/* ------------------------------------------------------------------ */
++/* 辅助                                                                */
++/* ------------------------------------------------------------------ */
++
++static bool airoha_xpon_stats_is_gpon(struct airoha_xpon *xpon)
++{
++	const struct airoha_xpon_proto_ops *ops = airoha_xpon_proto(xpon);
++
++	return ops && ops->mode == AIROHA_XPON_MODE_GPON;
++}
++
++/* ------------------------------------------------------------------ */
++/* gem_stats                                                           */
++/* ------------------------------------------------------------------ */
++
++static int airoha_xpon_gem_stats_show(struct seq_file *m, void *v)
++{
++	struct airoha_xpon *xpon = m->private;
++	u32 rx, tx, total_rx = 0, total_tx = 0;
++	unsigned int port, active = 0;
++
++	if (!airoha_xpon_stats_is_gpon(xpon)) {
++		seq_puts(m, "not in GPON mode\n");
++		return 0;
++	}
++
++	seq_puts(m, "gem_port      rx_frames      tx_frames\n");
++	seq_puts(m, "-------------------------------------\n");
++
++	/*
++	 * GEM Port ID 是 12 位（0..4095）。逐个读代价高，
++	 * 但 debugfs 是调试接口，可以接受；只输出非零项。
++	 */
++	for (port = 0; port < 4096; port++) {
++		if (airoha_xpon_gpon_get_gem_counter(xpon, port, &rx, &tx))
++			continue;
++		if (!rx && !tx)
++			continue;
++
++		seq_printf(m, "%8u  %12u  %12u\n", port, rx, tx);
++		total_rx += rx;
++		total_tx += tx;
++		active++;
++	}
++
++	seq_puts(m, "-------------------------------------\n");
++	seq_printf(m, "%8s  %12u  %12u  (%u active)\n",
++		   "total", total_rx, total_tx, active);
++
++	return 0;
++}
++
++static int airoha_xpon_gem_stats_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, airoha_xpon_gem_stats_show,
++			   inode->i_private);
++}
++
++static const struct file_operations airoha_xpon_gem_stats_fops = {
++	.owner		= THIS_MODULE,
++	.open		= airoha_xpon_gem_stats_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
++/* ------------------------------------------------------------------ */
++/* tcont_stats                                                         */
++/* ------------------------------------------------------------------ */
++
++static int airoha_xpon_tcont_stats_show(struct seq_file *m, void *v)
++{
++	struct airoha_xpon *xpon = m->private;
++	u32 rx, tx;
++	unsigned int i;
++
++	if (!airoha_xpon_stats_is_gpon(xpon)) {
++		seq_puts(m, "not in GPON mode\n");
++		return 0;
++	}
++
++	seq_puts(m, "tcont         rx_count       tx_count\n");
++	seq_puts(m, "-------------------------------------\n");
++
++	for (i = 0; i <= AIROHA_GPON_TCONT_MAX; i++) {
++		if (airoha_xpon_gpon_get_tcont_counter(xpon, i, &rx, &tx))
++			continue;
++		seq_printf(m, "%5u  %12u  %12u\n", i, rx, tx);
++	}
++
++	return 0;
++}
++
++static int airoha_xpon_tcont_stats_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, airoha_xpon_tcont_stats_show,
++			   inode->i_private);
++}
++
++static const struct file_operations airoha_xpon_tcont_stats_fops = {
++	.owner		= THIS_MODULE,
++	.open		= airoha_xpon_tcont_stats_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
++/* ------------------------------------------------------------------ */
++/* onu_info                                                            */
++/* ------------------------------------------------------------------ */
++
++static int airoha_xpon_onu_info_show(struct seq_file *m, void *v)
++{
++	struct airoha_xpon *xpon = m->private;
++	u32 grp0 = 0, grp1 = 0;
++
++	if (!airoha_xpon_stats_is_gpon(xpon)) {
++		seq_puts(m, "not in GPON mode\n");
++		return 0;
++	}
++
++	seq_puts(m, "=== ONU info ===\n");
++
++	/* 上游已有的 MAC 状态输出 */
++	airoha_xpon_gpon_debug_mac(xpon, m);
++
++	airoha_xpon_gpon_get_superframe(xpon);
++	seq_printf(m, "\nsuperframe  : %u\n",
++		   airoha_xpon_gpon_superframe_value(xpon));
++
++	airoha_xpon_gpon_get_error_status(xpon, &grp0, &grp1);
++	seq_printf(m, "error grp0  : 0x%08x\n", grp0);
++	seq_printf(m, "error grp1  : 0x%08x\n", grp1);
++
++	/* 告警历史（原厂 gpon_show_emergence_info） */
++	airoha_xpon_gpon_show_emergence(xpon, m);
++
++	return 0;
++}
++
++static int airoha_xpon_onu_info_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, airoha_xpon_onu_info_show, inode->i_private);
++}
++
++static const struct file_operations airoha_xpon_onu_info_fops = {
++	.owner		= THIS_MODULE,
++	.open		= airoha_xpon_onu_info_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
++/* ------------------------------------------------------------------ */
++/* sn_passwd                                                           */
++/* ------------------------------------------------------------------ */
++
++static int airoha_xpon_sn_passwd_show(struct seq_file *m, void *v)
++{
++	struct airoha_xpon *xpon = m->private;
++	const char *pwd = airoha_xpon_gpon_sn_passwd(xpon);
++
++	if (!airoha_xpon_stats_is_gpon(xpon)) {
++		seq_puts(m, "not in GPON mode\n");
++		return 0;
++	}
++
++	if (pwd)
++		seq_printf(m, "%s\n", pwd);
++	else
++		seq_puts(m, "(not set)\n");
++
++	return 0;
++}
++
++static int airoha_xpon_sn_passwd_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, airoha_xpon_sn_passwd_show, inode->i_private);
++}
++
++static ssize_t airoha_xpon_sn_passwd_write(struct file *file,
++					   const char __user *ubuf,
++					   size_t len, loff_t *ppos)
++{
++	struct seq_file *m = file->private_data;
++	struct airoha_xpon *xpon = m->private;
++	char buf[16];
++	size_t n;
++	int ret;
++
++	if (!airoha_xpon_stats_is_gpon(xpon))
++		return -EOPNOTSUPP;
++
++	if (len >= sizeof(buf))
++		return -EINVAL;
++
++	if (copy_from_user(buf, ubuf, len))
++		return -EFAULT;
++
++	buf[len] = '\0';
++
++	/* 去掉尾部换行 */
++	n = strnlen(buf, sizeof(buf));
++	while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
++		buf[--n] = '\0';
++
++	/*
++	 * 国内 PLOAM Password 固定 10 字符（ASCII），不足补 0。
++	 * 移动运营商要求严格格式，超长直接拒绝。
++	 */
++	if (n > 10)
++		return -EINVAL;
++
++	ret = airoha_xpon_gpon_set_sn_passwd(xpon, buf, n);
++	if (ret)
++		return ret;
++
++	dev_info(xpon->dev, "SN password set (%zu chars)\n", n);
++	return len;
++}
++
++static const struct file_operations airoha_xpon_sn_passwd_fops = {
++	.owner		= THIS_MODULE,
++	.open		= airoha_xpon_sn_passwd_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++	.write		= airoha_xpon_sn_passwd_write,
++};
++
++/* ------------------------------------------------------------------ */
++/* dba_tuning                                                          */
++/* ------------------------------------------------------------------ */
++
++static int airoha_xpon_dba_tuning_show(struct seq_file *m, void *v)
++{
++	struct airoha_xpon *xpon = m->private;
++
++	if (!airoha_xpon_stats_is_gpon(xpon)) {
++		seq_puts(m, "not in GPON mode\n");
++		return 0;
++	}
++
++	seq_puts(m, "=== DBA tuning ===\n");
++	seq_puts(m, "commands:\n");
++	seq_puts(m, "  echo slight 0|1   > dba_tuning\n");
++	seq_puts(m, "  echo shift  0|1   > dba_tuning\n");
++	seq_puts(m, "  echo value <green> <total> <yellow> > dba_tuning\n");
++
++	return 0;
++}
++
++static int airoha_xpon_dba_tuning_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, airoha_xpon_dba_tuning_show, inode->i_private);
++}
++
++static ssize_t airoha_xpon_dba_tuning_write(struct file *file,
++					    const char __user *ubuf,
++					    size_t len, loff_t *ppos)
++{
++	struct seq_file *m = file->private_data;
++	struct airoha_xpon *xpon = m->private;
++	char buf[64];
++	char cmd[16];
++	unsigned int a = 0, b = 0, c = 0;
++	size_t n;
++
++	if (!airoha_xpon_stats_is_gpon(xpon))
++		return -EOPNOTSUPP;
++
++	if (len >= sizeof(buf))
++		return -EINVAL;
++
++	if (copy_from_user(buf, ubuf, len))
++		return -EFAULT;
++
++	buf[len] = '\0';
++	n = strnlen(buf, sizeof(buf));
++	while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
++		buf[--n] = '\0';
++
++	if (sscanf(buf, "%15s %u %u %u", cmd, &a, &b, &c) < 2)
++		return -EINVAL;
++
++	if (!strcmp(cmd, "slight")) {
++		airoha_xpon_gpon_set_dba_slight_modify(xpon, a != 0);
++	} else if (!strcmp(cmd, "shift")) {
++		airoha_xpon_gpon_set_dba_shift_modify(xpon, a != 0);
++	} else if (!strcmp(cmd, "value")) {
++		airoha_xpon_gpon_set_dba_slight_value(xpon, a, b, c);
++	} else {
++		return -EINVAL;
++	}
++
++	return len;
++}
++
++static const struct file_operations airoha_xpon_dba_tuning_fops = {
++	.owner		= THIS_MODULE,
++	.open		= airoha_xpon_dba_tuning_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++	.write		= airoha_xpon_dba_tuning_write,
++};
++
++/* ------------------------------------------------------------------ */
++/* typeb                                                               */
++/* ------------------------------------------------------------------ */
++
++static int airoha_xpon_typeb_show(struct seq_file *m, void *v)
++{
++	struct airoha_xpon *xpon = m->private;
++
++	if (!airoha_xpon_stats_is_gpon(xpon)) {
++		seq_puts(m, "not in GPON mode\n");
++		return 0;
++	}
++
++	seq_puts(m, "=== TypeB protection ===\n");
++	seq_printf(m, "backup_valid: %d\n",
++		   airoha_xpon_gpon_typeb_backup_valid(xpon));
++
++	seq_puts(m, "\ncommands:\n");
++	seq_puts(m, "  echo backup      > typeb   备份当前队列配置\n");
++	seq_puts(m, "  echo restore     > typeb   倒换后恢复配置\n");
++	seq_puts(m, "  echo reset       > typeb   简版复位\n");
++	seq_puts(m, "  echo reset_full  > typeb   完整复位（TypeB 专用）\n");
++
++	return 0;
++}
++
++static int airoha_xpon_typeb_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, airoha_xpon_typeb_show, inode->i_private);
++}
++
++static ssize_t airoha_xpon_typeb_write(struct file *file,
++				       const char __user *ubuf,
++				       size_t len, loff_t *ppos)
++{
++	struct seq_file *m = file->private_data;
++	struct airoha_xpon *xpon = m->private;
++	char buf[24];
++	size_t n;
++
++	if (!airoha_xpon_stats_is_gpon(xpon))
++		return -EOPNOTSUPP;
++
++	if (len >= sizeof(buf))
++		return -EINVAL;
++
++	if (copy_from_user(buf, ubuf, len))
++		return -EFAULT;
++
++	buf[len] = '\0';
++	n = strnlen(buf, sizeof(buf));
++	while (n && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
++		buf[--n] = '\0';
++
++	if (!strcmp(buf, "backup"))
++		airoha_xpon_gpon_typeb_backup(xpon);
++	else if (!strcmp(buf, "restore"))
++		airoha_xpon_gpon_typeb_restore(xpon);
++	else if (!strcmp(buf, "reset"))
++		airoha_xpon_gpon_typeb_reset(xpon, false);
++	else if (!strcmp(buf, "reset_full"))
++		airoha_xpon_gpon_typeb_reset(xpon, true);
++	else
++		return -EINVAL;
++
++	return len;
++}
++
++static const struct file_operations airoha_xpon_typeb_fops = {
++	.owner		= THIS_MODULE,
++	.open		= airoha_xpon_typeb_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++	.write		= airoha_xpon_typeb_write,
++};
++
++/* ------------------------------------------------------------------ */
++/* dump_csr                                                            */
++/* ------------------------------------------------------------------ */
++
++static int airoha_xpon_dump_csr_show(struct seq_file *m, void *v)
++{
++	struct airoha_xpon *xpon = m->private;
++
++	if (!airoha_xpon_stats_is_gpon(xpon)) {
++		seq_puts(m, "not in GPON mode\n");
++		return 0;
++	}
++
++	/* 原厂 gponDevDumpCsr 的 109 个寄存器，走 seq_file 输出 */
++	airoha_xpon_gpon_dump_csr_seq(xpon, m);
++
++	return 0;
++}
++
++static int airoha_xpon_dump_csr_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, airoha_xpon_dump_csr_show, inode->i_private);
++}
++
++static const struct file_operations airoha_xpon_dump_csr_fops = {
++	.owner		= THIS_MODULE,
++	.open		= airoha_xpon_dump_csr_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
++/* ------------------------------------------------------------------ */
++/* 目录创建 / 销毁                                                     */
++/* ------------------------------------------------------------------ */
++
++/**
++ * airoha_xpon_stats_create - 为单个 XPON 实例创建 debugfs 目录
++ * @xpon: XPON 设备
++ *
++ * 由 probe 成功后调用。目录名用 netdev 名（如 pon0）区分多实例。
++ */
++int airoha_xpon_stats_create(struct airoha_xpon *xpon)
++{
++	struct dentry *dir;
++	int slot = -1;
++	int i, ret = 0;
++
++	if (!xpon || !xpon->dev)
++		return -EINVAL;
++
++	mutex_lock(&airoha_xpon_stats_lock);
++
++	/* 找一个空槽 */
++	for (i = 0; i < AIROHA_XPON_STATS_MAX; i++) {
++		if (!airoha_xpon_stats_entries[i].xpon) {
++			slot = i;
++			break;
++		}
++	}
++	if (slot < 0) {
++		mutex_unlock(&airoha_xpon_stats_lock);
++		return -ENOSPC;
++	}
++
++	if (!airoha_xpon_stats_root) {
++		airoha_xpon_stats_root =
++			debugfs_create_dir(AIROHA_XPON_STATS_DIR, NULL);
++		if (IS_ERR(airoha_xpon_stats_root)) {
++			ret = PTR_ERR(airoha_xpon_stats_root);
++			airoha_xpon_stats_root = NULL;
++			mutex_unlock(&airoha_xpon_stats_lock);
++			return ret;
++		}
++	}
++
++	dir = debugfs_create_dir(xpon->pon_netdev ?
++				 netdev_name(xpon->pon_netdev) : "xpon",
++				 airoha_xpon_stats_root);
++	if (IS_ERR(dir)) {
++		ret = PTR_ERR(dir);
++		mutex_unlock(&airoha_xpon_stats_lock);
++		return ret;
++	}
++
++	airoha_xpon_stats_entries[slot].xpon = xpon;
++	airoha_xpon_stats_entries[slot].dir = dir;
++
++	debugfs_create_file("gem_stats", 0444, dir, xpon,
++			    &airoha_xpon_gem_stats_fops);
++	debugfs_create_file("tcont_stats", 0444, dir, xpon,
++			    &airoha_xpon_tcont_stats_fops);
++	debugfs_create_file("onu_info", 0444, dir, xpon,
++			    &airoha_xpon_onu_info_fops);
++	debugfs_create_file("sn_passwd", 0644, dir, xpon,
++			    &airoha_xpon_sn_passwd_fops);
++	debugfs_create_file("dba_tuning", 0644, dir, xpon,
++			    &airoha_xpon_dba_tuning_fops);
++	debugfs_create_file("typeb", 0644, dir, xpon,
++			    &airoha_xpon_typeb_fops);
++	debugfs_create_file("dump_csr", 0444, dir, xpon,
++			    &airoha_xpon_dump_csr_fops);
++
++	mutex_unlock(&airoha_xpon_stats_lock);
++
++	dev_info(xpon->dev, "debugfs stats created\n");
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_stats_create);
++
++/**
++ * airoha_xpon_stats_destroy - 销毁 debugfs 目录
++ * @xpon: XPON 设备
++ */
++void airoha_xpon_stats_destroy(struct airoha_xpon *xpon)
++{
++	int i;
++
++	if (!xpon)
++		return;
++
++	mutex_lock(&airoha_xpon_stats_lock);
++	for (i = 0; i < AIROHA_XPON_STATS_MAX; i++) {
++		if (airoha_xpon_stats_entries[i].xpon == xpon) {
++			debugfs_remove_recursive(airoha_xpon_stats_entries[i].dir);
++			airoha_xpon_stats_entries[i].xpon = NULL;
++			airoha_xpon_stats_entries[i].dir = NULL;
++			break;
++		}
++	}
++	mutex_unlock(&airoha_xpon_stats_lock);
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_stats_destroy);
++
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Airoha xPON statistics via debugfs");
