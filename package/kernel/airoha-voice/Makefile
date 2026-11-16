@@ -6,11 +6,20 @@ include $(INCLUDE_DIR)/kernel.mk
 PKG_NAME:=airoha-voice
 PKG_RELEASE:=27
 
-PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/Sirherobrine23/airoha_voip.git
-PKG_SOURCE_DATE:=2026-09-24
-PKG_SOURCE_VERSION:=4222576d980856f3c9ffc323d2fd78a28f94f085
-PKG_MIRROR_HASH:=1bb5ccf053b1f3f0ebd8dbb3680a792312d119f2dee62658aa813689eba77588
+# 源码已内置为 vendor/airoha-voip-4222576d.tar.gz
+#
+# 原因：上游 commit 4222576d 已被 force push 从分支上丢弃。
+# GitHub 目前还能按 SHA 取到 dangling commit，但随时可能被 GC 清理，
+# 届时 CI 的 download 阶段会直接失败（第 6 次 CI 就是这样挂的）。
+#
+# 内置后：
+#   - 不再依赖网络与上游仓库状态
+#   - 构建可重复（哈希固定）
+#   - 源码在 vendor/airoha-voip/ 有完整解压副本可供审阅
+PKG_SOURCE:=airoha-voip-4222576d.tar.gz
+PKG_SOURCE_URL:=file://$(TOPDIR)/vendor
+PKG_HASH:=0ee5084a985ba0a3be96d5f232f86ad22c700ff99df6808ad97dac98f64ab97b
+PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-4222576d
 
 PKG_LICENSE:=GPL-2.0-only AND LicenseRef-Proprietary
 PKG_BUILD_PARALLEL:=1
