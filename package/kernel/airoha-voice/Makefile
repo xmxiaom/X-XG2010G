@@ -18,8 +18,8 @@ PKG_RELEASE:=27
 #   - 源码在 vendor/airoha-voip/ 有完整解压副本可供审阅
 PKG_SOURCE:=airoha-voip-4222576d.tar.gz
 PKG_SOURCE_URL:=file://$(TOPDIR)/vendor
-PKG_HASH:=0ee5084a985ba0a3be96d5f232f86ad22c700ff99df6808ad97dac98f64ab97b
-PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-4222576d
+PKG_HASH:=2488d19d94148f624c3384c87f4078ee5a71eccacc6c2c2ed609565fc0ffc6c5
+PKG_BUILD_DIR:=$(BUILD_DIR)/airoha-voip-4222576d
 
 PKG_LICENSE:=GPL-2.0-only AND LicenseRef-Proprietary
 PKG_BUILD_PARALLEL:=1

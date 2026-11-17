@@ -3,6 +3,68 @@
 本文件记录 Gemtek Brightspeed 固件仓库的重要功能、稳定性和维护变更。常规的
 ImmortalWrt 上游合并不逐项展开，仅记录会影响本设备构建或运行行为的内容。
 
+## 2026-11-17
+
+### 首次完整编译出固件，修复 13 处构建阻断问题
+
+固件 `immortalwrt-naoki66-snapshot-airoha-an7581-gemtek_xg2010g-ubi-squashfs-sysupgrade.itb`
+（90.3 MB，397 个包）编译成功并通过上机实测。
+
+#### GPON/EPON 驱动（`patches/feeds/pon_drivers/airoha-xpon`）
+
+- `airoha-xpon-main.c`：3 个控制器回调使用 `ops` 却未声明，补齐
+  `const struct airoha_xpon_proto_ops *ops;`（`rx_control`、`match_control`、
+  `advance_rx_locked`）。
+- `airoha-xpon-proto.c`：上游模式枚举无 `AIROHA_XPON_MODE_EPON_1G_1G`，改用
+  `AIROHA_XPON_MODE_EPON_1G`；补 `airoha-xpon-omci.h`、`airoha-xpon-oam.h`，
+  以及 `<linux/airoha-eth.h>`（`struct airoha_pon_ctrl_rx_info` 完整定义）；
+  `airoha_xpon_xgpon_advance()` 返回 `void` 与 ops 的 `int` 签名不符，新增
+  `xgpon_advance()` 包装返回 0。
+- `airoha-xpon-gpon.c`：补 `<linux/regmap.h>`（`regmap_set_bits/clear_bits`）
+  与 `<linux/iopoll.h>`（`readl_poll_timeout_atomic`）；`airoha_xpon_get_hir()`
+  从未实现，改为本地 `airoha_xpon_gpon_hir()` 返回 0 走保守分支（DBA SMALL +
+  执行 WAN 选择），寄存器窗口内确无版本寄存器；`udelay()` 两处触发
+  `__bad_udelay` 链接错误——运行期变量改为常量循环助手
+  `airoha_xpon_gpon_udelay()`，`udelay(0x8958)`（35 ms，超 arm64 单次 20 ms
+  上限）改为 `msleep(35)`；`airoha_xpon_gpon_rogue_handle()` 只有声明无实现，
+  补为提示日志并跳过（当前寄存器映射无流氓 ONU 检测窗口）。
+- `airoha-xpon-stats.c`：补 `<linux/netdevice.h>`（`netdev_name`）。
+
+#### 打包层
+
+- `package/base-files/Makefile`：版本号原为
+  `$(PKG_RELEASE)~$(lastword $(subst -, ,$(REVISION)))`，在无 `.git` 的环境下
+  变成 `261115.64147~unknown`，apk 拒绝 `~` 分隔符（`version is invalid`）。
+  改为纯 `$(PKG_RELEASE)`，两处（包元数据与 `base-files.version`）。
+- `package/kernel/airoha-voice/Makefile`：`PKG_BUILD_DIR` 名为
+  `airoha-voice-4222576d`，而 `vendor/airoha-voip-4222576d.tar.gz` 顶层目录是
+  `airoha-voip-4222576d`，补丁因找不到文件全部失败。改为 `airoha-voip-4222576d`。
+  同时 vendor 源码统一转 LF——原包为 CRLF，补丁为 LF，`patch` 报
+  `different line endings` 导致 9 个 hunk 全失败。
+- `package/network/services/asterisk-chan-en75xx/Makefile`：原用
+  `git clone https://github.com/Sirherobrine23/airoha_voip.git`，GitHub API
+  触发 403 限流后克隆不完整、哈希不符。改为
+  `PKG_SOURCE_URL:=file://$(TOPDIR)/vendor` + 内置 tarball。
+
+#### 构建环境（不在仓库内，需本机配置）
+
+- WSL 默认 7 GB 内存，LLVM 编译 OOM，需 `.wslconfig` 设 `memory=12GB, swap=12GB`。
+- WSL 默认把 Windows `PATH` 注入，其中含空格路径（`/mnt/d/Program Files/...`），
+  导致 `find -execdir` 以「相对路径不安全」拒绝执行，Rust 安装步骤失败。需
+  `/etc/wsl.conf` 设 `[interop] appendWindowsPath = false`。
+- root 编译需 `export FORCE_UNSAFE_CONFIGURE=1`。
+- `gn` 需要 `clang++` 且使用 `-std=c++23`，Ubuntu 22.04 自带 clang-15 只认
+  `c++2b`，需装 clang-18 并软链到 `/usr/local/bin`。
+- Rust 包需配 cargo 镜像（crates.io 国内不可达）；注意 OpenWrt 用
+  `dl/cargo` 作为独立 `CARGO_HOME`，配置要同时写到那里。
+- 编译中断会在 `openwrt/tmp/` 残留大量临时文件（`a.out`、`ar*`、`cc*.s`），
+  使 `make prepare-tmpinfo` 从 23 秒退化到 9 分钟以上，重编前需清理。
+
+#### 并发建议
+
+本机 4 核 8 线程 / 16 GB，`-j10` 会让 WSL 周期性失去响应（`WSAETIMEDOUT`），
+`-j6` 稳定。
+
 ## 2026-10-08
 
 ### 同步 ImmortalWrt 上游至 6.18.54

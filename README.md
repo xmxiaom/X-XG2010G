@@ -115,16 +115,34 @@ immortalwrt-<name>-YYYYMMDD-<repo-hash>-airoha-an7581-gemtek_xg2010g-ubi-squashf
 | 驱动骨架与寄存器头文件 | [`docs/zh-cn/gpon/src/`](docs/zh-cn/gpon/src) |
 | 逆向工具（capstone + pyelftools） | [`tools/re_xpon.py`](tools/re_xpon.py) · [`tools/re_ehframe.py`](tools/re_ehframe.py) |
 
-> 当前状态：寄存器层已完整还原并通过交叉验证；函数边界已由 `.eh_frame` 的 FDE 恢复（1634 个函数）。
-> 唯一实质缺口是内核侧 GTC/PLOAM 的实现（约 900–1000 行）。
+> 当前状态：**GPON 与 EPON 内核驱动已落地并完成上机实测**。
+> 寄存器层已完整还原并通过交叉验证；函数边界已由 `.eh_frame` 的 FDE 恢复（1634 个函数）。
+> 内核侧 GTC / PLOAM 已实现（[`patches/feeds/pon_drivers/airoha-xpon`](patches/feeds/pon_drivers/airoha-xpon)），
+> 支持 GPON、XG-PON、XGS-PON、EPON 1G/10G 多模切换。
 > 用户态 OMCI 已支持 CTC LOID ME，四大运营商的认证配置无需额外开发。
+
+## 编译
+
+固件已在 2026-11-17 完成首次全量编译并通过上机实测（90.3 MB / 397 个包）。
+完整的问题清单与复现步骤见 [`CHANGELOG.md`](CHANGELOG.md) 的 `2026-11-17` 条目。
+
+```sh
+export FORCE_UNSAFE_CONFIGURE=1
+./scripts/feeds update -a && ./scripts/feeds install -a
+cp 2010.config .config && make defconfig
+make -j6 V=s          # 建议 -j6；-j10 在 4C8T/16GB 上会让 WSL 失响应
+```
+
+构建环境的 6 个前置条件（WSL 内存、`appendWindowsPath`、clang-18、cargo 镜像、
+`dl/cargo` 独立 `CARGO_HOME`、`tmp/` 残留清理）同样记录在该 CHANGELOG 条目中。
+
 
 ## 致谢
 
 - [immortalwrt/immortalwrt](https://github.com/immortalwrt/immortalwrt) · [immortalwrt/luci](https://github.com/immortalwrt/luci) · [immortalwrt/packages](https://github.com/immortalwrt/packages)
 - [naoki66/ImmortalWrt-for-Gemtek-brightspeed](https://github.com/naoki66/ImmortalWrt-for-Gemtek-brightspeed) — 本仓库的派生来源
 - [naoki66/uboot-an758x](https://github.com/naoki66/uboot-an758x) — XG2010G 的 U-Boot / UBI 引导实现
-- [naoki66/openwrt-pon-drivers](https://github.com/naoki66/openwrt-pon-drivers) — PON 内核驱动（GPON 目前为 `RESERVED`）
+- [naoki66/openwrt-pon-drivers](https://github.com/naoki66/openwrt-pon-drivers) — PON 内核驱动（GPON/EPON 支持由本仓库补丁提供）
 - [naoki66/OpenWrt_ONU_CONFIG](https://github.com/naoki66/OpenWrt_ONU_CONFIG) — ONU 用户态 OMCI / LuCI 栈
 - [naoki66/luci-app-airoha](https://github.com/naoki66/luci-app-airoha) — Airoha 设备专属 LuCI 应用
 

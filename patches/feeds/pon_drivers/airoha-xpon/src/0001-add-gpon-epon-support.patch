@@ -1513,10 +1513,10 @@ index 0000000..700b440
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..8519f14
+index 0000000..cb2a0ff
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,3905 @@
+@@ -0,0 +1,3953 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1542,6 +1542,8 @@ index 0000000..8519f14
 +
 +#include <linux/delay.h>
 +#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/regmap.h>
 +#include <linux/ktime.h>
 +#include <linux/netdevice.h>
 +#include <linux/seq_file.h>
@@ -1828,7 +1830,48 @@ index 0000000..8519f14
 +void airoha_xpon_gpon_set_ploamu_int(struct airoha_xpon *xpon, bool on);
 +void airoha_xpon_gpon_set_bwm_stop_int(struct airoha_xpon *xpon, bool on);
 +void airoha_xpon_gpon_get_superframe(struct airoha_xpon *xpon);
-+void airoha_xpon_gpon_rogue_handle(struct airoha_xpon *xpon, bool on);
++/*
++ * 流氓 ONU（Rogue ONU）检测。
++ *
++ * 原厂固件通过独立的检测寄存器区开启上行误码/光功率监测，
++ * 当前寄存器映射没有对应窗口，因此这里只记录并提示，不做硬件操作。
++ * 命令链路（ROGUE_START / ROGUE_STOP）保持完整，
++ * 后续补齐寄存器定义后在此实现即可。
++ */
++static void airoha_xpon_gpon_rogue_handle(struct airoha_xpon *xpon, bool on)
++{
++	dev_info(xpon->dev,
++		 "rogue onu detection %s (register map not available), skip\n",
++		 on ? "start" : "stop");
++}
++
++/*
++ * 读取芯片 HIR（Hardware ID Register，硬件修订号）。
++ *
++ * GPON MAC 寄存器窗口从 0x0000（ONU_ID）开始，其中并没有版本寄存器，
++ * HIR 属于芯片/SCU 级信息，当前映射里没有对应地址。
++ *
++ * 这里返回 0 表示「修订未知」，调用方会走保守分支：
++ *   - DBA 使用 SMALL 缓冲
++ *   - 非 0xa/0xe 时执行 WAN 选择
++ * 拿到完整寄存器手册后，把真实读取逻辑填进本函数即可。
++ */
++/*
++ * 中断上下文按微秒延时。
++ *
++ * arm64 的 udelay() 要求参数是编译期常量，传运行期变量会落到
++ * __bad_udelay()（链接期未定义）。这里用常量 1us 调用循环，
++ * 既能处理运行期时长，又满足常量要求。ISR 里时长很小，开销可忽略。
++ */
++static void airoha_xpon_gpon_udelay(u32 us)
++{
++	while (us--)
++		udelay(1);
++}
++static u32 airoha_xpon_gpon_hir(struct airoha_xpon *xpon)
++{
++	return 0;
++}
 +void airoha_xpon_gpon_disable(struct airoha_xpon *xpon, bool keep_rx);
 +void airoha_xpon_gpon_report_event(struct airoha_xpon *xpon, u32 event,
 +				   u32 param);
@@ -3004,7 +3047,7 @@ index 0000000..8519f14
 + */
 +u32 airoha_xpon_gpon_get_hw_param(struct airoha_xpon *xpon, u32 reg)
 +{
-+	u32 hir = airoha_xpon_get_hir(xpon);
++	u32 hir = airoha_xpon_gpon_hir(xpon);
 +
 +	if (hir == 0xa) {
 +		if (airoha_xpon_gpon_read_param(xpon, 0x8023) != 1)
@@ -3119,7 +3162,7 @@ index 0000000..8519f14
 +	if (pending & AIROHA_GPON_IRQ_DYING_GASP) {
 +		if (xpon->gpon_dying_allowed) {
 +			if (xpon->gpon_dying_delay_us)
-+				udelay(xpon->gpon_dying_delay_us);
++				airoha_xpon_gpon_udelay(xpon->gpon_dying_delay_us);
 +			airoha_xpon_gpon_send_dying_gasp(xpon);
 +			airoha_xpon_gpon_set_ploamu_int(xpon, false);
 +		}
@@ -3448,7 +3491,7 @@ index 0000000..8519f14
 +	if (!xpon->gpon_base)
 +		return -ENODEV;
 +
-+	hir = airoha_xpon_get_hir(xpon);
++	hir = airoha_xpon_gpon_hir(xpon);
 +	if (hir == 0xa || hir == 0xc || hir == 0xe) {
 +		green = AIROHA_GPON_DBA_GREEN_BIG;
 +		total = AIROHA_GPON_DBA_GREEN_BIG;
@@ -3811,8 +3854,13 @@ index 0000000..8519f14
 +	if (!(v & 1))
 +		dev_warn(xpon->dev, "MIB table init not acked\n");
 +
-+	/* 原厂延时 0x8958（约 35ms），等表初始化完成 */
-+	udelay(0x8958);
++	/*
++	 * 原厂延时 0x8958（35160us，约 35ms），等表初始化完成。
++	 * 不能用 udelay()：arm64 单次 udelay 上限是 20ms，超限会生成
++	 * __bad_udelay()（链接期未定义）。本函数在进程上下文调用，
++	 * 用 msleep() 让出 CPU 更合适。
++	 */
++	msleep(35);
 +
 +	dev_dbg(xpon->dev, "gem mib tables initialized\n");
 +	return 0;
@@ -5005,7 +5053,7 @@ index 0000000..8519f14
 +static int airoha_xpon_gpon_dev_init(struct airoha_xpon *xpon)
 +{
 +	struct airoha_gpon_priv *priv = gpon_priv(xpon);
-+	u32 hir = airoha_xpon_get_hir(xpon);
++	u32 hir = airoha_xpon_gpon_hir(xpon);
 +
 +	/* 1. WAN 选择（非 0xa/0xe） */
 +	if (hir != 0xa && hir != 0xe)
@@ -5551,7 +5599,7 @@ index 0000000..d21245e
 +
 +#endif /* _AIROHA_XPON_GPON_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-main.c b/airoha-xpon/src/airoha-xpon-main.c
-index 19369ca..5653d9e 100644
+index 19369ca..f43657e 100644
 --- a/airoha-xpon/src/airoha-xpon-main.c
 +++ b/airoha-xpon/src/airoha-xpon-main.c
 @@ -24,6 +24,8 @@
@@ -5695,9 +5743,11 @@ index 19369ca..5653d9e 100644
  
  	/* The stopping gate closes asynchronous entry and upstream bursts. */
  	WRITE_ONCE(xpon->stopping, true);
-@@ -300,9 +318,9 @@ airoha_xpon_controller_rx_control(void *priv, struct sk_buff *skb,
+@@ -299,10 +317,11 @@ airoha_xpon_controller_rx_control(void *priv, struct sk_buff *skb,
+                                   const struct airoha_pon_ctrl_rx_info *info)
  {
  	struct airoha_xpon *xpon = priv;
++	const struct airoha_xpon_proto_ops *ops;
  
 -	if (READ_ONCE(xpon->active_mode_valid) &&
 -	    airoha_xpon_mode_is_epon(READ_ONCE(xpon->active_mode))) {
@@ -5708,7 +5758,14 @@ index 19369ca..5653d9e 100644
  		return;
  	}
  	airoha_xpon_omci_receive(xpon->omci, skb, info);
-@@ -319,9 +337,9 @@ airoha_xpon_controller_match_control(void *priv,
+@@ -314,14 +333,16 @@ airoha_xpon_controller_match_control(void *priv,
+ {
+ 	struct airoha_xpon *xpon = priv;
+ 	u16 onu_id = READ_ONCE(xpon->onu_id);
++	const struct airoha_xpon_proto_ops *ops;
++
+ 
+ 	/*
  	 * QDMA marks EPON OAM in its descriptor. ITU-T control traffic also uses
  	 * the active OMCC ID for classification.
  	 */
@@ -5721,7 +5778,7 @@ index 19369ca..5653d9e 100644
  
  	/* The default OMCC XGEM Port-ID follows the active ONU-ID. */
  	return xpon->omci && onu_id != AIROHA_XGPON_BROADCAST_ID &&
-@@ -331,10 +349,11 @@ airoha_xpon_controller_match_control(void *priv,
+@@ -331,10 +352,11 @@ airoha_xpon_controller_match_control(void *priv,
  static void airoha_xpon_controller_wake_control_tx(void *priv)
  {
  	struct airoha_xpon *xpon = priv;
@@ -5736,7 +5793,7 @@ index 19369ca..5653d9e 100644
  	else
  		airoha_xpon_omci_wake_tx(xpon->omci);
  }
-@@ -352,7 +371,7 @@ static bool airoha_xpon_handle_optical_loss_locked(struct airoha_xpon *xpon,
+@@ -352,7 +374,7 @@ static bool airoha_xpon_handle_optical_loss_locked(struct airoha_xpon *xpon,
                                                     unsigned long *delay)
  {
  	/* PMA PLUG_OUT precedes digital RX shutdown on RX_LOS. */
@@ -5745,7 +5802,7 @@ index 19369ca..5653d9e 100644
  	    (phy_events & AIROHA_XGPON_PHY_INT_RX_LOS)) {
  		if (xpon->rx_active) {
  			/* Preserve the edge source separately from the next polled LOS level. */
-@@ -382,7 +401,7 @@ static bool airoha_xpon_handle_optical_loss_locked(struct airoha_xpon *xpon,
+@@ -382,7 +404,7 @@ static bool airoha_xpon_handle_optical_loss_locked(struct airoha_xpon *xpon,
  			xpon->dev,
  			"PON RX stopping: optical signal absent, PHY events=0x%08x\n",
  			phy_events);
@@ -5754,9 +5811,11 @@ index 19369ca..5653d9e 100644
  			airoha_xpon_enter_popup(xpon, "optical signal absent");
  		airoha_xpon_deactivate_rx_locked(xpon);
  	}
-@@ -400,8 +419,14 @@ static void airoha_xpon_advance_rx_locked(struct airoha_xpon *xpon,
+@@ -399,9 +421,16 @@ static void airoha_xpon_advance_rx_locked(struct airoha_xpon *xpon,
+                                           u32 phy_events, unsigned long *delay)
  {
  	int ret;
++	const struct airoha_xpon_proto_ops *ops;
  
 -	if (!airoha_xpon_mode_is_epon(xpon->active_mode)) {
 -		airoha_xpon_xgpon_advance(xpon, phy_events, delay);
@@ -5771,7 +5830,7 @@ index 19369ca..5653d9e 100644
  		return;
  	}
  
-@@ -438,8 +463,12 @@ static void airoha_xpon_link_work(struct work_struct *work)
+@@ -438,8 +467,12 @@ static void airoha_xpon_link_work(struct work_struct *work)
  	mutex_lock(&xpon->state_lock);
  	if (xpon->stopping)
  		goto out_no_requeue;
@@ -5786,7 +5845,7 @@ index 19369ca..5653d9e 100644
  		airoha_xpon_xgpon_drain_ploamd_locked(xpon);
  
  	if (ret) {
-@@ -456,15 +485,17 @@ static void airoha_xpon_link_work(struct work_struct *work)
+@@ -456,15 +489,17 @@ static void airoha_xpon_link_work(struct work_struct *work)
  	/* The active digital PCS supplies LOS when provider signal validity is absent. */
  	if (optical.signal_valid) {
  		xpon->optical_signal = optical.signal_present;
@@ -5808,7 +5867,7 @@ index 19369ca..5653d9e 100644
  		if (atomic_xchg(&xpon->mac_restart_pending, 0))
  			airoha_xpon_xgpon_restart_mac(xpon, "OLT Deactivate");
  		if (atomic_xchg(&xpon->data_path_retry_pending, 0))
-@@ -489,7 +520,7 @@ static void airoha_xpon_link_work(struct work_struct *work)
+@@ -489,7 +524,7 @@ static void airoha_xpon_link_work(struct work_struct *work)
  	airoha_xpon_advance_rx_locked(xpon, phy_events, &delay);
  
  out_requeue:
@@ -5817,7 +5876,7 @@ index 19369ca..5653d9e 100644
  		airoha_xpon_xgpon_counters_update(xpon);
  	requeue = !xpon->stopping;
  	mutex_unlock(&xpon->state_lock);
-@@ -648,6 +679,16 @@ static int airoha_xpon_probe(struct platform_device *pdev)
+@@ -648,6 +683,16 @@ static int airoha_xpon_probe(struct platform_device *pdev)
  		return dev_err_probe(dev, PTR_ERR(xpon->xgpon_base),
  		                     "failed to map XG-PON MAC registers\n");
  
@@ -5904,10 +5963,10 @@ index ef8b0bb..513fcb3 100644
  /*
 diff --git a/airoha-xpon/src/airoha-xpon-proto.c b/airoha-xpon/src/airoha-xpon-proto.c
 new file mode 100644
-index 0000000..348888f
+index 0000000..9fb131f
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-proto.c
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,181 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581/AN7583 xPON —— 协议操作表实现
@@ -5921,12 +5980,16 @@ index 0000000..348888f
 +
 +#include <linux/module.h>
 +
++#include <linux/airoha-eth.h>
++
 +#include "airoha-xpon-private.h"
 +#include "airoha-xpon-proto.h"
 +
 +#include "airoha-xpon-gpon.h"
 +#include "airoha-xpon-xgpon.h"
 +#include "airoha-xpon-epon.h"
++#include "airoha-xpon-omci.h"
++#include "airoha-xpon-oam.h"
 +
 +/* ------------------------------------------------------------------ */
 +/* 模式 → 操作表                                                       */
@@ -5943,7 +6006,7 @@ index 0000000..348888f
 +	case AIROHA_XPON_MODE_EPON_10G_1G:
 +	case AIROHA_XPON_MODE_EPON_10G_10G:
 +		return &airoha_xpon_xgpon_ops;
-+	case AIROHA_XPON_MODE_EPON_1G_1G:
++	case AIROHA_XPON_MODE_EPON_1G:
 +		return &airoha_xpon_epon_ops;
 +	default:
 +		return NULL;
@@ -5995,6 +6058,13 @@ index 0000000..348888f
 +	return airoha_xpon_xgpon_los(xpon);
 +}
 +
++static int xgpon_advance(struct airoha_xpon *xpon, u32 phy_events,
++                          unsigned long *delay)
++{
++	airoha_xpon_xgpon_advance(xpon, phy_events, delay);
++	return 0;
++}
++
 +const struct airoha_xpon_proto_ops airoha_xpon_xgpon_ops = {
 +	.mode		= AIROHA_XPON_MODE_XGPON,
 +	.name		= "xgpon",
@@ -6012,7 +6082,7 @@ index 0000000..348888f
 +	.los		= xgpon_los,
 +	.pcs_synced	= NULL,
 +
-+	.advance	= airoha_xpon_xgpon_advance,
++	.advance	= xgpon_advance,
 +
 +	.control_rx	= xgpon_control_rx,
 +	.control_match	= xgpon_control_match,
@@ -6048,7 +6118,7 @@ index 0000000..348888f
 +}
 +
 +const struct airoha_xpon_proto_ops airoha_xpon_epon_ops = {
-+	.mode		= AIROHA_XPON_MODE_EPON_1G_1G,
++	.mode		= AIROHA_XPON_MODE_EPON_1G,
 +	.name		= "epon",
 +
 +	.prepare	= NULL,		/* EPON 在 start_rx 里一并做 */
@@ -6212,10 +6282,10 @@ index 0000000..af7c074
 +#endif /* _AIROHA_XPON_PROTO_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-stats.c b/airoha-xpon/src/airoha-xpon-stats.c
 new file mode 100644
-index 0000000..6725035
+index 0000000..262ddb1
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-stats.c
-@@ -0,0 +1,588 @@
+@@ -0,0 +1,589 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 xPON —— 统计查询接口（debugfs）
@@ -6254,6 +6324,7 @@ index 0000000..6725035
 +#include <linux/debugfs.h>
 +#include <linux/fs.h>
 +#include <linux/module.h>
++#include <linux/netdevice.h>
 +#include <linux/seq_file.h>
 +#include <linux/slab.h>
 +#include <linux/uaccess.h>
