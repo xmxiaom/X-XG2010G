@@ -13,7 +13,7 @@
 > 本仓库只维护 **XG2010G** 一个机型。
 > 由 [naoki66/ImmortalWrt-for-Gemtek-brightspeed](https://github.com/naoki66/ImmortalWrt-for-Gemtek-brightspeed) 派生后**已独立**，不再跟随后者的多机型路线，也不再与上游同步设备集合。
 >
-> 同时承载**国内四大运营商 GPON 适配**的研究与移植工作（见文末）。
+> 同时承载**国内四大运营商 GPON / EPON 适配**的研究与移植工作（见文末）。
 
 **文档基线**：`master`，内核 `6.18.60`（[`target/linux/generic/kernel-6.18`](target/linux/generic/kernel-6.18)）。
 
@@ -99,18 +99,18 @@ immortalwrt-<name>-YYYYMMDD-<repo-hash>-airoha-an7581-gemtek_xg2010g-ubi-squashf
 > 升级前备份配置并用 `apk list --installed` 记录已装包，升级后重装；
 > 不要恢复旧固件的 `kmod-*` 内核模块。
 
-## GPON 适配（国内运营商）
+## GPON / EPON 适配（国内运营商）
 
-面向**中国电信 / 联通 / 移动 / 广电 GPON 线路**的分析与移植：
+面向**中国电信 / 联通 / 移动 / 广电 GPON 与 EPON 线路**的分析与移植：
 
 | 内容 | 位置 |
 |---|---|
-| 原厂 GPON 实现分析（`xpon.ko` 逆向证据链） | [`docs/zh-cn/gpon/01-原厂GPON实现分析.md`](docs/zh-cn/gpon/01-原厂GPON实现分析.md) |
-| 四大运营商认证 / VLAN / OMCC 差异 | [`docs/zh-cn/gpon/02-四运营商GPON认证差异.md`](docs/zh-cn/gpon/02-四运营商GPON认证差异.md) |
+| 原厂 GPON / EPON 实现分析（`xpon.ko` 逆向证据链） | [`docs/zh-cn/gpon/01-原厂GPON实现分析.md`](docs/zh-cn/gpon/01-原厂GPON实现分析.md) |
+| 四大运营商认证 / VLAN / OMCC 差异（GPON 与 EPON） | [`docs/zh-cn/gpon/02-四运营商GPON认证差异.md`](docs/zh-cn/gpon/02-四运营商GPON认证差异.md) |
 | 移植路线与 GPL 溯源 | [`docs/zh-cn/gpon/03-GPL溯源与移植路线.md`](docs/zh-cn/gpon/03-GPL溯源与移植路线.md) |
 | GPL 源码索取函（中英双版） | [`docs/zh-cn/gpon/04-GPL源码索取函.md`](docs/zh-cn/gpon/04-GPL源码索取函.md) |
 | 驱动接入点清单（精确到行号） | [`docs/zh-cn/gpon/05-驱动接入点清单.md`](docs/zh-cn/gpon/05-驱动接入点清单.md) |
-| **GPON MAC 寄存器表（110 个，逆向还原）** | [`docs/zh-cn/gpon/06-逆向成果-GPON寄存器表.md`](docs/zh-cn/gpon/06-逆向成果-GPON寄存器表.md) |
+| **GPON / EPON MAC 寄存器表（逆向还原）** | [`docs/zh-cn/gpon/06-逆向成果-GPON寄存器表.md`](docs/zh-cn/gpon/06-逆向成果-GPON寄存器表.md) |
 | 状态机逆向进度 | [`docs/zh-cn/gpon/07-状态机逆向进度.md`](docs/zh-cn/gpon/07-状态机逆向进度.md) |
 | 驱动骨架与寄存器头文件 | [`docs/zh-cn/gpon/src/`](docs/zh-cn/gpon/src) |
 | 逆向工具（capstone + pyelftools） | [`tools/re_xpon.py`](tools/re_xpon.py) · [`tools/re_ehframe.py`](tools/re_ehframe.py) |
