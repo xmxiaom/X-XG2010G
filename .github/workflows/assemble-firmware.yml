@@ -31,7 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p parts
-          gh release download "$TAG" --pattern 'xg2010g-fw.part*' --dir parts
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'xg2010g-fw.part*' --dir parts
           echo "--- parts ---"
           ls -l parts | head -20
 
@@ -71,15 +71,15 @@ jobs:
           NAME="immortalwrt-xm-snapshot-airoha-an7581-gemtek_xg2010g-ubi-squashfs-sysupgrade.itb"
           cp firmware.itb "$NAME"
           sha256sum "$NAME" > sha256sums-firmware.txt
-          gh release upload "$TAG" "$NAME" sha256sums-firmware.txt --clobber
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "$NAME" sha256sums-firmware.txt --clobber
 
           echo "--- 删除分块 ---"
-          gh release view "$TAG" --json assets -q '.assets[].name' \
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' \
             | grep '^xg2010g-fw.part' \
             | while read -r f; do
                 echo "delete $f"
-                gh release delete-asset "$TAG" "$f" -y
+                gh release delete-asset "$TAG" "$f" --repo "$GITHUB_REPOSITORY" -y
               done
 
           echo "--- 最终资产 ---"
-          gh release view "$TAG" --json assets -q '.assets[] | "\(.name)\t\(.size)"'
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[] | "\(.name)\t\(.size)"'
