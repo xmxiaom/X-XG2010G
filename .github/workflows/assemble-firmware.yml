@@ -1,0 +1,85 @@
+name: Assemble firmware from parts
+
+# 本地上传 90MB 固件时，GitHub 会在约 140-200 秒后重置连接，
+# 因此固件被切成多个 6MB 的 part 上传。
+# 这个 workflow 在 GitHub 侧把 part 合并回单个 .itb、校验 SHA256，
+# 再作为正式资产上传，最后删掉分块。
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to assemble (e.g. v1.0.2-xg2010g)'
+        required: true
+        default: 'v1.0.2-xg2010g'
+      expected_sha256:
+        description: 'Expected SHA256 of the assembled firmware'
+        required: true
+        default: '3cf5917ec9ee070e5a9ef635513616b6c58924c476abd0466fdbec6be3baa267'
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download parts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p parts
+          gh release download "$TAG" --pattern 'xg2010g-fw.part*' --dir parts
+          echo "--- parts ---"
+          ls -l parts | head -20
+
+      - name: Assemble in order
+        run: |
+          set -euo pipefail
+          cd parts
+          ls xg2010g-fw.part* | sort > ../list.txt
+          echo "--- 拼接顺序 ---"
+          cat ../list.txt
+          cat $(cat ../list.txt) > ../firmware.itb
+          cd ..
+          echo "--- 结果 ---"
+          ls -l firmware.itb
+          sha256sum firmware.itb
+
+      - name: Verify SHA256
+        env:
+          EXPECT: ${{ github.event.inputs.expected_sha256 }}
+        run: |
+          set -euo pipefail
+          ACTUAL=$(sha256sum firmware.itb | awk '{print $1}')
+          echo "expected: $EXPECT"
+          echo "actual  : $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECT" ]; then
+            echo "::error::SHA256 不匹配，停止上传"
+            exit 1
+          fi
+          echo "✅ 校验通过"
+
+      - name: Upload single firmware and drop parts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          NAME="immortalwrt-xm-snapshot-airoha-an7581-gemtek_xg2010g-ubi-squashfs-sysupgrade.itb"
+          cp firmware.itb "$NAME"
+          sha256sum "$NAME" > sha256sums-firmware.txt
+          gh release upload "$TAG" "$NAME" sha256sums-firmware.txt --clobber
+
+          echo "--- 删除分块 ---"
+          gh release view "$TAG" --json assets -q '.assets[].name' \
+            | grep '^xg2010g-fw.part' \
+            | while read -r f; do
+                echo "delete $f"
+                gh release delete-asset "$TAG" "$f" -y
+              done
+
+          echo "--- 最终资产 ---"
+          gh release view "$TAG" --json assets -q '.assets[] | "\(.name)\t\(.size)"'
