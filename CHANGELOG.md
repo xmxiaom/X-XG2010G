@@ -3,6 +3,33 @@
 本文件记录 Gemtek Brightspeed 固件仓库的重要功能、稳定性和维护变更。常规的
 ImmortalWrt 上游合并不逐项展开，仅记录会影响本设备构建或运行行为的内容。
 
+## 2026-11-17（v1.0.2）
+
+### 修复登录页样式回退、双列列表断线
+
+固件 `immortalwrt-xm-snapshot-airoha-an7581-gemtek_xg2010g-ubi-squashfs-sysupgrade.itb`
+（90.3 MB），SHA256 `3cf5917ec9ee070e5a9ef635513616b6c58924c476abd0466fdbec6be3baa267`。
+
+#### 登录页退回默认样式（v1.0.1 引入）
+
+v1.0.1 在 argon 的 `footer_login.ut` 里用 `{% if (firmware_info) %}` 包裹版本链接，
+`{% }` 不是合法的 ucode 模板结束符，模板渲染抛异常后 `dispatcher.uc` 会回退渲染
+通用 `sysauth` 模板 —— 于是 Argon 的居中卡片登录页变成左上角带侧边栏的默认页面。
+
+现改为**只在该 `{% %}` 代码块内计算变量，完全不改动 HTML 结构**：
+
+- 逐段兜底 `distname` / `distversion` / `distrevision`，任一缺失不再拼出 `null`
+- `disturl` 缺失时回退到本仓库地址
+- 已用 host 侧 `ucode` 实际执行代码块验证，输出 `ImmortalWrt Xm XG2010G SNAPSHOT`
+
+#### ONU 状态页「线路事件」断线
+
+双列网格（`.pon-list--split`）按行填充，分组里记录数为奇数时最后一行右侧留空，
+导致倒数第二行右半边没有下边框，看起来像少了两根线。
+
+- `status.js`：`detailList()` 在 `split` 且记录数为奇数时补一对不可见的占位单元格
+- `onu.css`：`.pon-pad` 只保留上边框，高度与内边距归零，不额外占一行
+
 ## 2026-11-17（v1.0.1）
 
 ### 版本号改为 Xm，修复登录页空版本号、光信号状态矛盾、TX 误判
