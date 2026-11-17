@@ -53,7 +53,7 @@ VERSION_BUG_URL:=$(call qstrip,$(CONFIG_VERSION_BUG_URL))
 VERSION_BUG_URL:=$(if $(VERSION_BUG_URL),$(VERSION_BUG_URL),https://github.com/immortalwrt/immortalwrt/issues)
 
 VERSION_HOME_URL:=$(call qstrip,$(CONFIG_VERSION_HOME_URL))
-VERSION_HOME_URL:=$(if $(VERSION_HOME_URL),$(VERSION_HOME_URL),https://github.com/naoki66/)
+VERSION_HOME_URL:=$(if $(VERSION_HOME_URL),$(VERSION_HOME_URL),https://github.com/xmxiaom/X-XG2010G)
 
 VERSION_SUPPORT_URL:=$(call qstrip,$(CONFIG_VERSION_SUPPORT_URL))
 VERSION_SUPPORT_URL:=$(if $(VERSION_SUPPORT_URL),$(VERSION_SUPPORT_URL),https://github.com/immortalwrt/immortalwrt/discussions)

@@ -19,7 +19,7 @@
 #   3. 唯一的 CONFIG_TARGET_<board>_<subtarget>_DEVICE_<name>=y；
 #      同时启用多个设备（multi-profile）时型号不明确，跳过推导；
 #   4. 沿用 config 里现有 CONFIG_VERSION_DIST 的设备名后缀
-#      （如 "ImmortalWrt naoki66 XG-040G-MD" -> "XG-040G-MD"），
+#      （如 "ImmortalWrt Xm XG-040G-MD" -> "XG-040G-MD"），
 #      保证种子 config 里手写的设备名仍能推导出默认主机名。
 # 归一化：先剥厂牌前缀（gemtek_/nokia_）与 -ubi 后缀，再查已知设备别名表
 # known_device_model；查不到时退化为大写原样输出。新增设备只需在别名表加一行。
@@ -32,7 +32,7 @@
 #   留空表示保持内置默认（ImmortalWrt）。
 #
 # 可用环境变量覆盖：
-#   VERSION_DIST            发行版名（默认 "ImmortalWrt naoki66 <设备型号>"，用于页脚等
+#   VERSION_DIST            发行版名（默认 "ImmortalWrt Xm <设备型号>"，用于页脚等
 #                           展示；固件文件名会自动去掉型号后缀，避免重复）
 #   VERSION_PRODUCT         设备产品名（默认取识别到的设备型号，写入 os-release）
 #   DEVICE_HOSTNAME         默认主机名（默认取识别到的设备型号，如 XR1710G）
@@ -74,13 +74,13 @@ normalize_device_model() {
 }
 
 # 从 config 现有的 CONFIG_VERSION_DIST 提取设备名后缀：
-# "ImmortalWrt naoki66 XG-040G-MD" -> "XG-040G-MD"；只有发行版名时返回失败。
+# "ImmortalWrt Xm XG-040G-MD" -> "XG-040G-MD"；只有发行版名时返回失败。
 detect_model_from_dist() {
 	local dist rest
 	dist="$(sed -n -e 's/^CONFIG_VERSION_DIST="\(.*\)"$/\1/p' "$config_file" | head -n 1)"
 	[ -n "$dist" ] || return 1
 	rest="${dist#ImmortalWrt}"
-	rest="${rest# naoki66}"
+	rest="${rest# Xm}"
 	rest="${rest# }"
 	[ -n "$rest" ] || return 1
 	printf '%s' "$rest"
@@ -106,7 +106,7 @@ detect_device_model() {
 device_model="$(detect_device_model || true)"
 # profile 推导不到时，沿用 config 里已有的设备名后缀，防止被覆盖丢失
 [ -n "$device_model" ] || device_model="$(detect_model_from_dist || true)"
-version_dist="${VERSION_DIST:-ImmortalWrt naoki66${device_model:+ $device_model}}"
+version_dist="${VERSION_DIST:-ImmortalWrt Xm${device_model:+ $device_model}}"
 version_product="${VERSION_PRODUCT:-$device_model}"
 # 默认主机名沿用简约化设备名；空格/下划线转连字符，剔除非法字符（主机名只允许 ASCII）
 hostname="${DEVICE_HOSTNAME:-$device_model}"

@@ -1,0 +1,31 @@
+diff --git a/ucode/template/themes/argon/footer_login.ut b/ucode/template/themes/argon/footer_login.ut
+index e213006..30358ca 100644
+--- a/ucode/template/themes/argon/footer_login.ut
++++ b/ucode/template/themes/argon/footer_login.ut
+@@ -19,14 +19,24 @@
+ </div>
+ {%
+ 	const luci_info = 'Powered by ' + version.luciname + ' (' + version.luciversion + ')';
+-	const firmware_info = version.distname + ' ' + version.distversion + '-' + version.distrevision;
++	/*
++	 * 版本号三段分别来自 /etc/os-release 的 NAME / VERSION / BUILD_ID。
++	 * 任一字段缺失时旧写法会拼出 "null null-null"，这里逐段兜底：
++	 * 缺哪段省哪段，全缺时整个版本链接不渲染。
++	 */
++	const dist_name = (version.distname && version.distname != 'null') ? version.distname : '';
++	const dist_ver = (version.distversion && version.distversion != 'null') ? version.distversion : '';
++	const dist_rev = (version.distrevision && version.distrevision != 'null') ? version.distrevision : '';
++	let firmware_info = dist_name;
++	if (dist_ver) firmware_info += (firmware_info ? ' ' : '') + dist_ver;
++	if (dist_rev) firmware_info += '-' + dist_rev;
+ %}
+ <footer>
+ 	<div class="login-footer-links">
+ 		<a href="https://github.com/openwrt/luci" target="_blank" title="{{ entityencode(luci_info, true) }}">{{ split(version.luciname, ' (')[0] }}</a>
+ 		<a href="https://github.com/jerrykuku/luci-theme-argon" target="_blank">ArgonTheme {# vPKG_VERSION #}</a>
+ 	</div>
+-	<a href="{{ version.disturl }}" target="_blank" title="{{ entityencode(firmware_info, true) }}">{{ firmware_info }}</a>
++	{% if (firmware_info) %}<a href="{{ version.disturl }}" target="_blank" title="{{ entityencode(firmware_info, true) }}">{{ firmware_info }}</a>{% }
+ </footer>
+ </main>
+ </div>

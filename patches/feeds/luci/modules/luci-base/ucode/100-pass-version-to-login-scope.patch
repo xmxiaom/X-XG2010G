@@ -1,0 +1,20 @@
+diff --git a/modules/luci-base/ucode/dispatcher.uc b/modules/luci-base/ucode/dispatcher.uc
+index b6f412a..22d6907 100644
+--- a/modules/luci-base/ucode/dispatcher.uc
++++ b/modules/luci-base/ucode/dispatcher.uc
+@@ -972,6 +972,7 @@ dispatch = function(_http, path) {
+ 					let scope = {
+ 						duser: 'root',
+ 						fuser: user,
++						version,
+ 						auth_fields: auth_fields,
+ 						auth_message: auth_message,
+ 						auth_html: auth_html,
+@@ -1016,6 +1017,7 @@ dispatch = function(_http, path) {
+ 						let scope = {
+ 							duser: 'root',
+ 							fuser: user,
++							version,
+ 							auth_plugin: length(auth_check.challenges) ? auth_check.challenges[0].name : null,
+ 							auth_fields: auth_check.fields,
+ 							auth_message: auth_verify.message ?? auth_check.message,

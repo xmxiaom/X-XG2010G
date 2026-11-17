@@ -3,7 +3,73 @@
 本文件记录 Gemtek Brightspeed 固件仓库的重要功能、稳定性和维护变更。常规的
 ImmortalWrt 上游合并不逐项展开，仅记录会影响本设备构建或运行行为的内容。
 
-## 2026-11-17
+## 2026-11-17（v1.0.1）
+
+### 版本号改为 Xm，修复登录页空版本号、光信号状态矛盾、TX 误判
+
+固件 `immortalwrt-xm-snapshot-airoha-an7581-gemtek_xg2010g-ubi-squashfs-sysupgrade.itb`
+（90.3 MB / 397 包），SHA256 `75d6c9e242633445de9428c46817d88d641b72637a9e0de54f2693df531e0be8`。
+
+#### 版本号 naoki66 → Xm
+
+- `2010.config`：`CONFIG_VERSION_DIST="ImmortalWrt Xm XG2010G"`
+- `scripts/set-build-version.sh`：默认发行版名与 `detect_model_from_dist()` 的后缀解析
+- `include/version.mk`：`VERSION_HOME_URL` 默认值改为本仓库地址
+
+固件文件名、`/etc/os-release` 的 `NAME` / `ID` / `PRETTY_NAME`、
+LuCI 页脚与「状态 → 概览」的固件版本随之变为 Xm。
+
+#### 登录页显示 `null null-null`
+
+`dispatcher.uc` 渲染登录页时传给模板的 `scope` 缺少 `version`（未认证登录与
+2FA 两处），导致 `version.distname` / `distversion` / `distrevision` 全为 null。
+
+- 新增 `patches/feeds/luci/modules/luci-base/ucode/100-pass-version-to-login-scope.patch`
+- 新增 `patches/feeds/argon/ucode/template/themes/argon/100-fix-null-version-footer.patch`：
+  模板逐段兜底，缺哪段省哪段，全缺时不渲染版本链接
+
+#### 光信号状态矛盾（有光却报无光）
+
+现象：Rx 光功率 -23.47 dBm 正常、「已检测到光信号：是」，但「线路状态」
+显示「无光 / 等待光信号」。
+
+根因：**GPON 驱动从不更新 `xpon->lifecycle`**（仅 EPON 会更新），GPON 模式
+永远停在 `main.c` 初始化的 `AIROHA_XPON_WAIT_OPTICAL_SIGNAL`。
+
+- `airoha-xpon-gpon.c`：新增 `airoha_xpon_gpon_sync_lifecycle()`，在
+  `airoha_xpon_gpon_set_state()` 尾部把 O1–O7 映射到通用 lifecycle：
+  O1 有光→`WAIT_LINE_SYNC`、无光→`WAIT_OPTICAL_SIGNAL`；O2→`WAIT_LINE_SYNC`；
+  O3/O4/O7→`PROTOCOL_ACTIVATING`；O5→`OPERATIONAL`；O6→`WAIT_OPTICAL_SIGNAL`
+- `airoha-xpon-main.c`：光信号采样后刷新 lifecycle，覆盖「光插拔但不触发
+  状态切换」的场景
+- `luci-app-pon-status` / `luci-app-onu`：前端以实测 `optical_signal` 为准，
+  有光但未同步时显示「同步中」而非「无光」
+
+补丁：`patches/feeds/pon_drivers/.../0001-add-gpon-epon-support.patch`（更新）、
+`patches/feeds/onu_config/luci-app-onu/.../101-fix-lifecycle-optical-signal.patch`、
+`patches/feeds/onu_config/luci-app-pon-status/.../100-fix-lifecycle-and-tx-state.patch`
+
+#### TX 未发光被误判为故障
+
+激光器在 O1/O2 未使能时读数为 -40 dBm，原判定 `>= -5 ? 预警 : 故障` 会把它
+标成红色「差/故障」，与旁边正常的 Rx 读数矛盾。改为 `<-10` → 「未发光」，
+RX `<-35` → 「无读数」。
+
+#### 前端适配核对
+
+- ONU 板块：GPON 与 EPON 双分支对称，覆盖 ONU 状态 O1–O7、GTC/XGTC 同步、
+  ONU-ID、LLID、内核数据路径、服务就绪、上行突发、帧计数器、MPCP 状态、光模块
+- 状态概览：6 种模式波长全映射（gpon / xgpon / xgspon / epon-1g /
+  epon-10g-1g / epon-10g-10g），Rx/Tx 量程与温度、电压、偏置电流
+
+#### 未集成：蒲公英异地组网
+
+`OrayOS/OpenOray` 的 `pgyvpn` 为预编译二进制，实测依赖
+`libssl.so.1.1` / `libcrypto.so.1.1`（`OPENSSL_1_1_0`），
+而本固件 openssl 3.5.9 仅提供 `libssl.so.3`，二进制不兼容。
+集成需让 pgyvpn 私有链接 openssl 1.1 且不干扰系统 openssl 3。
+
+## 2026-11-17（v1.0.0）
 
 ### 首次完整编译出固件，修复 13 处构建阻断问题
 

@@ -1,0 +1,41 @@
+diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js
+index e458d95..ed13ded 100644
+--- a/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js
++++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js
+@@ -90,6 +90,20 @@ function frontendReading(frontend, field, unit) {
+ 	]);
+ }
+ 
++/*
++ * 光信号以实测 optical_signal 为准。有光但 lifecycle 仍是
++ * wait-optical-signal 时，等的是下行帧同步而非光本身，按 wait-line-sync
++ * 展示，避免「线路状态」与「已检测到光信号」互相矛盾。
++ */
++function effectiveLifecycle(line) {
++	var lc = (line && line.lifecycle) || '';
++
++	if (lc == 'wait-optical-signal' && line && line.optical_signal === true)
++		return 'wait-line-sync';
++
++	return lc;
++}
++
+ function displayLifecycle(value) {
+ 	switch (value) {
+ 	case 'stopped': return _('Stopped');
+@@ -726,12 +740,12 @@ function renderLine(item) {
+ 
+ 	tags = [
+ 		badge(modeLabel(mode.shown)),
+-		stateLabel(lifecycleSeverity(line.lifecycle), displayLifecycle(line.lifecycle))
++		stateLabel(lifecycleSeverity(effectiveLifecycle(line)), displayLifecycle(effectiveLifecycle(line)))
+ 	];
+ 
+ 	tiles = [
+-		metricTile(_('Line state'), displayLifecycle(line.lifecycle),
+-			lifecycleSeverity(line.lifecycle)),
++		metricTile(_('Line state'), displayLifecycle(effectiveLifecycle(line)),
++			lifecycleSeverity(effectiveLifecycle(line))),
+ 		metricTile(_('Optical signal detected'), displayBoolean(line.optical_signal),
+ 			booleanSeverity(line.optical_signal)),
+ 		metricTile(_('Receive optical power'),

@@ -1,0 +1,64 @@
+diff --git a/luci-app-pon-status/htdocs/luci-static/resources/view/status/include/29a_pon.js b/luci-app-pon-status/htdocs/luci-static/resources/view/status/include/29a_pon.js
+index fdcb009..6557e21 100644
+--- a/luci-app-pon-status/htdocs/luci-static/resources/view/status/include/29a_pon.js
++++ b/luci-app-pon-status/htdocs/luci-static/resources/view/status/include/29a_pon.js
+@@ -205,11 +205,23 @@ function lineState(line) {
+ 	var lifecycle = (line && line.lifecycle) || '';
+ 	var parts = [], fault = false, progress = false;
+ 
++	/*
++	 * 光信号以实测 optical_signal 为准：只有它明确为 false 才算无光。
++	 * 有光但 lifecycle 仍报 wait-optical-signal，说明等的是下行帧同步
++	 * 而不是光本身，此时按 wait-line-sync 展示，避免同一块面板里
++	 * 「线路状态：无光」与「已检测到光信号：是」自相矛盾。
++	 */
++	var noOptical = (line && line.optical_signal === false);
++	var effective = lifecycle;
++
++	if (lifecycle == 'wait-optical-signal' && !noOptical)
++		effective = 'wait-line-sync';
++
+ 	if (lifecycle == 'operational' && mode && mode != 'none') {
+ 		parts.push(LIFECYCLE_LABEL['operational']);
+ 	}
+ 	else {
+-		if (lifecycle == 'wait-optical-signal' || (line && line.optical_signal === false)) {
++		if (noOptical) {
+ 			parts.push(LIFECYCLE_LABEL['wait-optical-signal']);
+ 			fault = true;
+ 		}
+@@ -219,9 +231,9 @@ function lineState(line) {
+ 			fault = true;
+ 		}
+ 
+-		if (lifecycle == 'wait-line-sync' || lifecycle == 'protocol-activating' ||
+-		    lifecycle == 'pma-configured') {
+-			parts.push(LIFECYCLE_LABEL[lifecycle]);
++		if (effective == 'wait-line-sync' || effective == 'protocol-activating' ||
++		    effective == 'pma-configured') {
++			parts.push(LIFECYCLE_LABEL[effective]);
+ 			progress = true;
+ 		}
+ 
+@@ -344,9 +356,21 @@ function powerStatus(kind, value, hasSignal) {
+ 			return { text: '正常', severity: 'success' };
+ 		if (value >= -29)
+ 			return { text: '临界预警', severity: 'warning' };
++		/* 低于 -35 dBm 已无有效光功率，按无读数处理而非故障 */
++		if (value < -35)
++			return { text: '无读数', severity: 'muted' };
+ 		return { text: '差/故障', severity: 'error' };
+ 	}
+ 
++	/*
++	 * TX 读数远低于有效窗口（典型 -40 dBm）表示激光器没使能：GPON 在
++	 * O1/O2 尚未上行时、EPON 在未注册时读到的就是这个值。这不是故障，
++	 * 否则一次正常的待机就会被标成红色「差/故障」，与旁边正常的 Rx 读数
++	 * 互相矛盾。
++	 */
++	if (value < -10)
++		return { text: '未发光', severity: 'muted' };
++
+ 	if (value > 5)
+ 		return { text: '过载', severity: 'error' };
+ 	if (value >= 0.5)

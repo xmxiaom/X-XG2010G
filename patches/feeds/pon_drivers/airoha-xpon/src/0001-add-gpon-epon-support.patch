@@ -1,5 +1,5 @@
 diff --git a/airoha-xpon/src/Makefile b/airoha-xpon/src/Makefile
-index 44479aa..5e69f0e 100644
+index b7abf5b..fb834be 100644
 --- a/airoha-xpon/src/Makefile
 +++ b/airoha-xpon/src/Makefile
 @@ -7,4 +7,6 @@ airoha-xpon-y := airoha-xpon-main.o airoha-xpon-identity.o \
@@ -1238,7 +1238,7 @@ index 0000000..3a13b53
 +
 +#endif /* _AIROHA_XPON_EPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-epon.c b/airoha-xpon/src/airoha-xpon-epon.c
-index 0a2ff9f..dfc6665 100644
+index 4950cfc..3318caa 100644
 --- a/airoha-xpon/src/airoha-xpon-epon.c
 +++ b/airoha-xpon/src/airoha-xpon-epon.c
 @@ -418,6 +418,24 @@ static int airoha_xpon_epon_start_mac(struct airoha_xpon *xpon)
@@ -1328,7 +1328,7 @@ index 0a2ff9f..dfc6665 100644
  {
  	int ret;
 diff --git a/airoha-xpon/src/airoha-xpon-epon.h b/airoha-xpon/src/airoha-xpon-epon.h
-index 71414bc..c7d0b2f 100644
+index 67b2b0e..2d501e6 100644
 --- a/airoha-xpon/src/airoha-xpon-epon.h
 +++ b/airoha-xpon/src/airoha-xpon-epon.h
 @@ -23,4 +23,16 @@ int airoha_xpon_epon_advance(struct airoha_xpon *xpon, u32 phy_events,
@@ -1513,10 +1513,10 @@ index 0000000..700b440
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..cb2a0ff
+index 0000000..9ed953f
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,3953 @@
+@@ -0,0 +1,4000 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1817,6 +1817,50 @@ index 0000000..cb2a0ff
 +};
 +
 +/* 前置声明：状态机与命令分发互相调用 */
++/*
++ * 把 GPON 的 O1–O7 状态机同步到通用 lifecycle。
++ *
++ * 上游只让 EPON 更新 lifecycle，GPON 一直停在 main.c 初始化的
++ * WAIT_OPTICAL_SIGNAL，于是即使光模块已经收到光（optical_signal=1、
++ * Rx 功率正常），前端「线路状态」仍显示无光/等待光信号，与
++ * 「已检测到光信号」自相矛盾。
++ *
++ * 映射原则：
++ *   O1 且无光 -> WAIT_OPTICAL_SIGNAL（真无光）
++ *   O1 但有光 -> WAIT_LINE_SYNC（光已就绪，等下行帧同步）
++ *   O2        -> WAIT_LINE_SYNC
++ *   O3/O4/O7  -> PROTOCOL_ACTIVATING（测距/注册中）
++ *   O5        -> OPERATIONAL
++ *   O6 POPUP  -> WAIT_OPTICAL_SIGNAL（掉线重连）
++ */
++static void airoha_xpon_gpon_sync_lifecycle(struct airoha_xpon *xpon,
++                                            u32 gpon_state)
++{
++	bool optical = READ_ONCE(xpon->optical_signal);
++
++	switch (gpon_state) {
++	case AIROHA_GPON_O1_INITIAL:
++		xpon->lifecycle = optical ? AIROHA_XPON_WAIT_LINE_SYNC :
++					   AIROHA_XPON_WAIT_OPTICAL_SIGNAL;
++		break;
++	case AIROHA_GPON_O2_STANDBY:
++		xpon->lifecycle = AIROHA_XPON_WAIT_LINE_SYNC;
++		break;
++	case AIROHA_GPON_O3_SERIAL:
++	case AIROHA_GPON_O4_RANGING:
++	case AIROHA_GPON_O7_EMERGENCY:
++		xpon->lifecycle = AIROHA_XPON_PROTOCOL_ACTIVATING;
++		break;
++	case AIROHA_GPON_O5_OPERATION:
++		xpon->lifecycle = AIROHA_XPON_OPERATIONAL;
++		break;
++	case AIROHA_GPON_O6_POPUP:
++		xpon->lifecycle = AIROHA_XPON_WAIT_OPTICAL_SIGNAL;
++		break;
++	default:
++		break;
++	}
++}
 +void airoha_xpon_gpon_set_state(struct airoha_xpon *xpon, u32 new_state);
 +int airoha_xpon_gpon_cmd(struct airoha_xpon *xpon, u32 arg, u32 cmd);
 +void airoha_xpon_gpon_apply_cfg(struct airoha_xpon *xpon, u32 cmd, u32 param);
@@ -2949,6 +2993,9 @@ index 0000000..cb2a0ff
 +	priv->state = new_state;
 +
 +out:
++	/* 同步到通用 lifecycle，供前端「线路状态」使用 */
++	airoha_xpon_gpon_sync_lifecycle(xpon, new_state);
++
 +	/* 原厂公共尾部：调度 LED 与 PON 任务。
 +	 * 上游用 link_work 统一调度，这里只标记状态，
 +	 * 由 airoha_xpon_gpon_advance() 周期性处理。
@@ -5599,7 +5646,7 @@ index 0000000..d21245e
 +
 +#endif /* _AIROHA_XPON_GPON_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-main.c b/airoha-xpon/src/airoha-xpon-main.c
-index 19369ca..f43657e 100644
+index 8b0f1c3..c56db21 100644
 --- a/airoha-xpon/src/airoha-xpon-main.c
 +++ b/airoha-xpon/src/airoha-xpon-main.c
 @@ -24,6 +24,8 @@
@@ -5689,11 +5736,12 @@ index 19369ca..f43657e 100644
 -		xpon->lifecycle = AIROHA_XPON_WAIT_OPTICAL_SIGNAL;
 -		return 0;
 -	}
+-
+-	return airoha_xpon_xgpon_prepare(xpon);
 +	ops = airoha_xpon_proto(xpon);
 +	if (!ops)
 +		return -EOPNOTSUPP;
- 
--	return airoha_xpon_xgpon_prepare(xpon);
++
 +	if (ops->mask_irqs)
 +		ops->mask_irqs(xpon);
 +
@@ -5815,10 +5863,11 @@ index 19369ca..f43657e 100644
                                            u32 phy_events, unsigned long *delay)
  {
  	int ret;
-+	const struct airoha_xpon_proto_ops *ops;
- 
+-
 -	if (!airoha_xpon_mode_is_epon(xpon->active_mode)) {
 -		airoha_xpon_xgpon_advance(xpon, phy_events, delay);
++	const struct airoha_xpon_proto_ops *ops;
++
 +	ops = airoha_xpon_proto(xpon);
 +	if (ops && ops->advance) {
 +		ret = ops->advance(xpon, phy_events, delay);
@@ -5845,7 +5894,7 @@ index 19369ca..f43657e 100644
  		airoha_xpon_xgpon_drain_ploamd_locked(xpon);
  
  	if (ret) {
-@@ -456,15 +489,17 @@ static void airoha_xpon_link_work(struct work_struct *work)
+@@ -456,15 +489,31 @@ static void airoha_xpon_link_work(struct work_struct *work)
  	/* The active digital PCS supplies LOS when provider signal validity is absent. */
  	if (optical.signal_valid) {
  		xpon->optical_signal = optical.signal_present;
@@ -5853,12 +5902,27 @@ index 19369ca..f43657e 100644
 -		xpon->optical_signal = !airoha_xpon_epon_los(xpon);
  	} else {
 -		xpon->optical_signal = !airoha_xpon_xgpon_los(xpon);
+-	}
 +		const struct airoha_xpon_proto_ops *pops =
 +			airoha_xpon_proto(xpon);
 +
 +		if (pops && pops->los)
 +			xpon->optical_signal = !pops->los(xpon);
- 	}
++	}
++
++	/*
++	 * GPON 的 lifecycle 由 gpon.c 的 O1–O7 状态机维护，但光信号在
++	 * 这里统一采样：光插拔不一定伴随状态切换（O1 会一直保持），
++	 * 若不在此刷新，光已恢复后前端仍显示「无光 / 等待光信号」。
++	 * 只在「等光」与「等同步」两态间切换，不干扰 O3–O5 的推进。
++	 */
++	if (READ_ONCE(xpon->active_mode) == AIROHA_XPON_MODE_GPON &&
++	    (xpon->lifecycle == AIROHA_XPON_WAIT_OPTICAL_SIGNAL ||
++	     xpon->lifecycle == AIROHA_XPON_WAIT_LINE_SYNC))
++		xpon->lifecycle = xpon->optical_signal ?
++				   AIROHA_XPON_WAIT_LINE_SYNC :
++				   AIROHA_XPON_WAIT_OPTICAL_SIGNAL;
++
  	airoha_xpon_leds_update(xpon);
  
  	/* IRQ queues Deactivate; link_work commits the plain MAC reset under state_lock. */
@@ -5867,7 +5931,7 @@ index 19369ca..f43657e 100644
  		if (atomic_xchg(&xpon->mac_restart_pending, 0))
  			airoha_xpon_xgpon_restart_mac(xpon, "OLT Deactivate");
  		if (atomic_xchg(&xpon->data_path_retry_pending, 0))
-@@ -489,7 +524,7 @@ static void airoha_xpon_link_work(struct work_struct *work)
+@@ -489,7 +538,7 @@ static void airoha_xpon_link_work(struct work_struct *work)
  	airoha_xpon_advance_rx_locked(xpon, phy_events, &delay);
  
  out_requeue:
@@ -5876,7 +5940,7 @@ index 19369ca..f43657e 100644
  		airoha_xpon_xgpon_counters_update(xpon);
  	requeue = !xpon->stopping;
  	mutex_unlock(&xpon->state_lock);
-@@ -648,6 +683,16 @@ static int airoha_xpon_probe(struct platform_device *pdev)
+@@ -648,6 +697,16 @@ static int airoha_xpon_probe(struct platform_device *pdev)
  		return dev_err_probe(dev, PTR_ERR(xpon->xgpon_base),
  		                     "failed to map XG-PON MAC registers\n");
  
@@ -5894,7 +5958,7 @@ index 19369ca..f43657e 100644
  	if (IS_ERR(xpon->epon_base))
  		return dev_err_probe(dev, PTR_ERR(xpon->epon_base),
 diff --git a/airoha-xpon/src/airoha-xpon-mode.c b/airoha-xpon/src/airoha-xpon-mode.c
-index 318aa58..1a336c1 100644
+index 8359949..cca1bf2 100644
 --- a/airoha-xpon/src/airoha-xpon-mode.c
 +++ b/airoha-xpon/src/airoha-xpon-mode.c
 @@ -17,6 +17,7 @@ static const struct airoha_xpon_mode_info airoha_xpon_modes[] = {
@@ -5906,7 +5970,7 @@ index 318aa58..1a336c1 100644
  	{
  		.mode = AIROHA_XPON_MODE_XGPON,
 diff --git a/airoha-xpon/src/airoha-xpon-private.h b/airoha-xpon/src/airoha-xpon-private.h
-index ef8b0bb..513fcb3 100644
+index ed050a9..82a2cef 100644
 --- a/airoha-xpon/src/airoha-xpon-private.h
 +++ b/airoha-xpon/src/airoha-xpon-private.h
 @@ -247,10 +247,26 @@ struct airoha_xpon_data_path_state {
