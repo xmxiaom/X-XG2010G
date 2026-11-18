@@ -70,25 +70,17 @@ index e458d95..a361192 100644
  			booleanSeverity(line.optical_signal)),
  		metricTile(_('Receive optical power'),
 diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css b/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css
-index 05512e9..bab6357 100644
+index 05512e9..4940c1e 100644
 --- a/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css
 +++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css
-@@ -173,6 +173,19 @@
+@@ -173,6 +173,11 @@
  	.pon-list--split > dd:nth-of-type(odd) {
  		padding-right: 1.5rem;
  	}
 +
-+/*
-+	 * Split lists pad odd counts with an invisible pair so every visual row is
-+	 * full. Keep the hairline but take no height, otherwise the filler would
-+	 * add an empty row of its own.
-+	 */
 +	.pon-list--split > .pon-pad {
-+		height: 0;
-+		padding-top: 0;
-+		padding-bottom: 0;
-+		line-height: 0;
-+		overflow: hidden;
++		color: transparent;
++		pointer-events: none;
 +	}
  }
  
