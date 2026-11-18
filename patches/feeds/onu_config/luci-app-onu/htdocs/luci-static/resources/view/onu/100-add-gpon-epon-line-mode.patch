@@ -1,7 +1,8 @@
 diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
+index 19e9dfc..86ffb13 100644
 --- a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
 +++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js
-@@ -166,6 +166,8 @@
+@@ -166,6 +166,8 @@ return view.extend({
  		 * 10G line modes are offered. Both values stay valid in the daemons, so a
  		 * board configured with either one still runs.
  		 */
@@ -11,9 +12,10 @@ diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/config.js b/luci
  		o.value('xgspon', _('XGS-PON 10G/10G'));
  		o.value('epon-10g-1g', _('10G-EPON 10G/1G'));
 diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
+index 3638c7b..d392554 100644
 --- a/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
 +++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/hardware.js
-@@ -506,6 +506,8 @@
+@@ -506,6 +506,8 @@ return view.extend({
  		 * 10G line modes are offered. Both values stay valid in the daemons, so a
  		 * board configured with either one still runs.
  		 */

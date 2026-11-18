@@ -5,6 +5,10 @@
 # 补丁必须保持 CRLF 才能 git apply 成功。这里覆盖上面的 eol=lf。
 patches/feeds/onu_config/**/*.patch -text
 
+# pon_drivers 的 airoha-xpon-epon.c 是混合行尾（CRLF 与 LF 混用），
+# 涉及 CRLF 区域的补丁被归一化成 LF 后无法 apply，同样保持原样。
+patches/feeds/pon_drivers/**/*.patch -text
+
 *.sh text eol=lf
 *.dts text eol=lf
 *.dts[io] text eol=lf

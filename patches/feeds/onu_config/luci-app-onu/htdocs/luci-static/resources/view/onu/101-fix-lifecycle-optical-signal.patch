@@ -1,5 +1,93 @@
+diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css b/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css
+index 05512e9..0dda31d 100644
+--- a/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css
++++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css
+@@ -125,14 +125,18 @@
+ 	margin: 0;
+ }
+ 
+-.pon-list > dt {
++/*
++ * 用后代选择器而不是直接子选择器，这样单列与双列共用同一套字号和内边距，
++ * 不必为两种布局各写一遍。
++ */
++.pon-list dt {
+ 	padding: 0.4375rem 0;
+ 	font-size: 0.8125rem;
+ 	line-height: 1.4;
+ 	color: var(--pon-muted);
+ }
+ 
+-.pon-list > dd {
++.pon-list dd {
+ 	margin: 0;
+ 	padding: 0.4375rem 0;
+ 	font-size: 0.875rem;
+@@ -142,39 +146,51 @@
+ 	word-break: break-word;
+ }
+ 
++/* 单列模式：每个直接子元素自己顶上一条细线 */
++/*
++ * 分隔线画在元素底部，不是顶部。
++ *
++ * 双列网格里每行的 dt/dd 是按行铺满的，底线由该行所有元素共同构成；
++ * 分组记录数为奇数时最后一行只剩左半边，若用 border-top，倒数第二行
++ * 右半边就没有元素可承载那条线，视觉上断一截。改成 borderline-bottom，
++ * 从上往下读时每一行的下沿都是完整的，末行单独去掉即可。
++ */
+ .pon-list > dt,
+ .pon-list > dd {
+-	border-top: 1px solid var(--pon-rule);
++	border-bottom: 1px solid var(--pon-rule);
+ }
+ 
+-.pon-list > dt:first-child,
+-.pon-list > dt:first-child + dd {
+-	border-top: 0;
++/* 最后一行不画底线 */
++.pon-list > dt:last-of-type,
++.pon-list > dd:last-of-type {
++	border-bottom: 0;
+ }
+ 
+ /* Counters: figures share a column start, so tabular digits line up. */
+-.pon-list--numeric > dd {
++.pon-list--numeric dd {
+ 	font-variant-numeric: tabular-nums;
+ }
+ 
+-/* Two pairs per row where there is room, so long counter groups stay short. */
++/*
++ * 双列模式：两对一行，用 4 列网格。
++ *
++ * 注意分隔线写在每个格子的 border-bottom 上（见上方 .pon-list > dt/dd），
++ * 不能写成 border-top —— 记录数为奇数时最后一行只剩左半边，用 border-top
++ * 的话倒数第二行右半边没有元素承载那条线，会缺一截。
++ */
+ @media (min-width: 48rem) {
+ 	.pon-list--split {
+ 		grid-template-columns: minmax(7.5rem, 20%) 1fr minmax(7.5rem, 20%) 1fr;
+ 		column-gap: 1rem;
+ 	}
+ 
+-	/* First visual row holds two pairs, so four children stay unlined. */
+-	.pon-list--split > :nth-child(-n+4) {
+-		border-top: 0;
+-	}
+-
+ 	/* Widen the gutter between the pairs, not inside a pair. */
+ 	.pon-list--split > dd:nth-of-type(odd) {
+ 		padding-right: 1.5rem;
+ 	}
+ }
+ 
++
+ .pon-fold .pon-subhead {
+ 	padding: 0.875rem 0 0.3125rem;
+ }
 diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js b/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js
-index e458d95..a361192 100644
+index e458d95..ed13ded 100644
 --- a/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js
 +++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/status.js
 @@ -90,6 +90,20 @@ function frontendReading(frontend, field, unit) {
@@ -23,37 +111,7 @@ index e458d95..a361192 100644
  function displayLifecycle(value) {
  	switch (value) {
  	case 'stopped': return _('Stopped');
-@@ -635,13 +649,27 @@ function listNodes(rows) {
-  */
- function detailList(rows, flags) {
- 	var classes = [ 'pon-list' ];
-+	var split = !!(flags && flags.split);
- 
--	if (flags && flags.split)
-+	if (split)
- 		classes.push('pon-list--split');
- 	if (flags && flags.numeric)
- 		classes.push('pon-list--numeric');
- 
--	return E('dl', { 'class': classes.join(' ') }, listNodes(rows));
-+	var nodes = listNodes(rows);
-+
-+	/*
-+	 * 双列网格按行填充，奇数条记录会让最后一行右侧空着，于是倒数第二行
-+	 * 右半边没有下边框，看起来像断了一截线。补一对不可见的占位单元格
-+	 * 占住空位，每行都凑满两对，分隔线才连续。
-+	 */
-+	if (split && (rows.length % 2))
-+		nodes.push(
-+			E('dt', { 'class': 'pon-pad', 'aria-hidden': 'true' }, ''),
-+			E('dd', { 'class': 'pon-pad', 'aria-hidden': 'true' }, '')
-+		);
-+
-+	return E('dl', { 'class': classes.join(' ') }, nodes);
- }
- 
- function detailGroup(group) {
-@@ -726,12 +754,12 @@ function renderLine(item) {
+@@ -726,12 +740,12 @@ function renderLine(item) {
  
  	tags = [
  		badge(modeLabel(mode.shown)),
@@ -69,19 +127,3 @@ index e458d95..a361192 100644
  		metricTile(_('Optical signal detected'), displayBoolean(line.optical_signal),
  			booleanSeverity(line.optical_signal)),
  		metricTile(_('Receive optical power'),
-diff --git a/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css b/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css
-index 05512e9..4940c1e 100644
---- a/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css
-+++ b/luci-app-onu/htdocs/luci-static/resources/view/onu/onu.css
-@@ -173,6 +173,11 @@
- 	.pon-list--split > dd:nth-of-type(odd) {
- 		padding-right: 1.5rem;
- 	}
-+
-+	.pon-list--split > .pon-pad {
-+		color: transparent;
-+		pointer-events: none;
-+	}
- }
- 
- .pon-fold .pon-subhead {
