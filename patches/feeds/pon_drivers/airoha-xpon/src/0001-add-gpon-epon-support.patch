@@ -5646,7 +5646,7 @@ index 0000000..d21245e
 +
 +#endif /* _AIROHA_XPON_GPON_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-main.c b/airoha-xpon/src/airoha-xpon-main.c
-index 8b0f1c3..c56db21 100644
+index 8b0f1c3..683c193 100644
 --- a/airoha-xpon/src/airoha-xpon-main.c
 +++ b/airoha-xpon/src/airoha-xpon-main.c
 @@ -24,6 +24,8 @@
@@ -5859,7 +5859,33 @@ index 8b0f1c3..c56db21 100644
  			airoha_xpon_enter_popup(xpon, "optical signal absent");
  		airoha_xpon_deactivate_rx_locked(xpon);
  	}
-@@ -399,9 +421,16 @@ static void airoha_xpon_advance_rx_locked(struct airoha_xpon *xpon,
+@@ -395,13 +417,42 @@ static bool airoha_xpon_handle_optical_loss_locked(struct airoha_xpon *xpon,
+ 	return true;
+ }
+ 
++/*
++ * 前端 I2C 连续读取失败时的重试间隔。
++ *
++ * 单次 I2C 传输超时是 1000ms，而链路轮询周期只有 250ms —— 总线被从设备
++ * 拉死（SDA 长期为低）后，固定 2s 重试会让 link_work 反复卡在超时里，
++ * workqueue 被占满，系统最终响应不了 watchdog。
++ *
++ * 让间隔随连续失败次数翻倍（2s→4s→8s→16s→30s 封顶）：即使前端彻底失联，
++ * 系统仍有大段时间可调度，watchdog 不会误杀。
++ */
++static unsigned int airoha_xpon_i2c_backoff_ms(unsigned int fails)
++{
++	unsigned int ms = AIROHA_XPON_RETRAIN_RETRY_MS;
++
++	while (fails > 1 && ms < AIROHA_XPON_I2C_BACKOFF_MAX_MS) {
++		ms <<= 1;
++		fails--;
++	}
++
++	return min(ms, AIROHA_XPON_I2C_BACKOFF_MAX_MS);
++}
++
+ static void airoha_xpon_advance_rx_locked(struct airoha_xpon *xpon,
                                            u32 phy_events, unsigned long *delay)
  {
  	int ret;
@@ -5879,7 +5905,7 @@ index 8b0f1c3..c56db21 100644
  		return;
  	}
  
-@@ -438,8 +467,12 @@ static void airoha_xpon_link_work(struct work_struct *work)
+@@ -438,14 +489,21 @@ static void airoha_xpon_link_work(struct work_struct *work)
  	mutex_lock(&xpon->state_lock);
  	if (xpon->stopping)
  		goto out_no_requeue;
@@ -5894,7 +5920,23 @@ index 8b0f1c3..c56db21 100644
  		airoha_xpon_xgpon_drain_ploamd_locked(xpon);
  
  	if (ret) {
-@@ -456,15 +489,31 @@ static void airoha_xpon_link_work(struct work_struct *work)
+ 		xpon->last_start_error = ret;
+ 		xpon->lifecycle = AIROHA_XPON_ERROR;
+-		delay = msecs_to_jiffies(AIROHA_XPON_RETRAIN_RETRY_MS);
++		if (xpon->i2c_error_count < UINT_MAX)
++			xpon->i2c_error_count++;
++		delay = msecs_to_jiffies(
++			airoha_xpon_i2c_backoff_ms(xpon->i2c_error_count));
+ 		dev_warn_ratelimited(
+ 			xpon->dev,
+ 			"failed to read optical frontend status: %d; retrying\n",
+@@ -453,18 +511,37 @@ static void airoha_xpon_link_work(struct work_struct *work)
+ 		goto out_requeue;
+ 	}
+ 
++	/* 前端恢复正常，退避计数清零 */
++	xpon->i2c_error_count = 0;
++
  	/* The active digital PCS supplies LOS when provider signal validity is absent. */
  	if (optical.signal_valid) {
  		xpon->optical_signal = optical.signal_present;
@@ -5931,7 +5973,7 @@ index 8b0f1c3..c56db21 100644
  		if (atomic_xchg(&xpon->mac_restart_pending, 0))
  			airoha_xpon_xgpon_restart_mac(xpon, "OLT Deactivate");
  		if (atomic_xchg(&xpon->data_path_retry_pending, 0))
-@@ -489,7 +538,7 @@ static void airoha_xpon_link_work(struct work_struct *work)
+@@ -489,7 +566,7 @@ static void airoha_xpon_link_work(struct work_struct *work)
  	airoha_xpon_advance_rx_locked(xpon, phy_events, &delay);
  
  out_requeue:
@@ -5940,7 +5982,7 @@ index 8b0f1c3..c56db21 100644
  		airoha_xpon_xgpon_counters_update(xpon);
  	requeue = !xpon->stopping;
  	mutex_unlock(&xpon->state_lock);
-@@ -648,6 +697,16 @@ static int airoha_xpon_probe(struct platform_device *pdev)
+@@ -648,6 +725,16 @@ static int airoha_xpon_probe(struct platform_device *pdev)
  		return dev_err_probe(dev, PTR_ERR(xpon->xgpon_base),
  		                     "failed to map XG-PON MAC registers\n");
  
@@ -5970,7 +6012,7 @@ index 8359949..cca1bf2 100644
  	{
  		.mode = AIROHA_XPON_MODE_XGPON,
 diff --git a/airoha-xpon/src/airoha-xpon-private.h b/airoha-xpon/src/airoha-xpon-private.h
-index ed050a9..82a2cef 100644
+index ed050a9..aef712e 100644
 --- a/airoha-xpon/src/airoha-xpon-private.h
 +++ b/airoha-xpon/src/airoha-xpon-private.h
 @@ -247,10 +247,26 @@ struct airoha_xpon_data_path_state {
@@ -6000,7 +6042,21 @@ index ed050a9..82a2cef 100644
  	void __iomem *epon_base;
  	void __iomem *pon_phy_base;
  	struct regmap *scu;
-@@ -314,6 +330,24 @@ struct airoha_xpon {
+@@ -275,6 +291,13 @@ struct airoha_xpon {
+ 	enum airoha_xpon_mode active_mode;
+ 	enum airoha_xpon_lifecycle lifecycle;
+ 	int last_start_error;
++	/*
++	 * 连续读取前端（BOSA）失败的次数。
++	 * 单次 I2C 传输超时 1s，而链路轮询间隔只有 250ms；总线一旦被从设备
++	 * 拉死，固定重试会让 link_work 长期卡在超时里，最终把系统拖到
++	 * watchdog 重启。用它驱动指数退避。
++	 */
++	unsigned int i2c_error_count;
+ 	unsigned long no_sync_since;
+ 	int mac_irq;
+ 	int phy_irq;
+@@ -314,6 +337,24 @@ struct airoha_xpon {
  	bool service_ready;
  	bool stopping;
  	bool active_mode_valid;
@@ -6025,6 +6081,17 @@ index ed050a9..82a2cef 100644
  };
  
  /*
+@@ -326,7 +367,9 @@ struct airoha_xpon {
+ 
+ #define AIROHA_XGPON_PLOAMD_MAX_DRAIN    20
+ #define AIROHA_XPON_LINK_POLL_MS         250
+-#define AIROHA_XPON_RETRAIN_RETRY_MS     2000
++#define AIROHA_XPON_RETRAIN_RETRY_MS     2000
++/* I2C 连续失败时轮询间隔的上限，避免退避无限增长 */
++#define AIROHA_XPON_I2C_BACKOFF_MAX_MS  30000
+ #define AIROHA_XPON_SYNC_LOSS_CONFIRM_MS AIROHA_XPON_LINK_POLL_MS
+ /* Allow 3500 ms for readiness or LOS recovery before another PMA reset. */
+ #define AIROHA_XPON_NO_SYNC_RECOVERY_MS 3500
 diff --git a/airoha-xpon/src/airoha-xpon-proto.c b/airoha-xpon/src/airoha-xpon-proto.c
 new file mode 100644
 index 0000000..9fb131f
