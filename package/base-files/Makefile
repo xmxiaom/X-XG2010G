@@ -235,6 +235,11 @@ endif
 	$(LN) /tmp/resolv.conf /tmp/TZ /tmp/localtime $(1)/etc/
 	$(LN) /tmp/sysinfo/board.json $(1)/etc/board.json
 
+	# LuCI 的 dispatcher.uc 只从 /etc/os-release 读发行版名、版本号和构建号，
+	# 而本包只安装 /usr/lib/os-release。缺这个链接时，登录页与页脚会把
+	# 版本号渲染成 "null null-null"（三个字段全部取不到）。
+	$(LN) ../usr/lib/os-release $(1)/etc/os-release
+
 	chmod 0600 $(1)/etc/shadow
 	chmod 1777 $(1)/tmp
 
