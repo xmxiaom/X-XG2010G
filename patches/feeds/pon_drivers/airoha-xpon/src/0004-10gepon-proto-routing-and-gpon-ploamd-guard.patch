@@ -1,0 +1,126 @@
+Subject: fix(xpon): 10G-EPON 走 EPON 协议栈 + GPON PLOAMd 死循环保护
+
+两个独立缺陷，均由联机实测定位。
+
+1) 10G-EPON 两档被路由到 XG-PON 协议栈（xgpon_ops）
+
+   10G-EPON 的下行接收器在 XEPON PCS 内，只有 EPON 路径的 start_rx
+   才会写 XEPON_PCS_RX_CTRL = 0x80810302（RX_ENABLE）。走 XG-PON 路径时
+   该寄存器恒为 0x80810300（RX_DISABLE），PCS 收到 0 个码字、永不同步。
+
+   实测（10G-EPON 线路，已插纤）：
+     修复前：rx_control_raw=0x80810300, pcs_sync=0, all_codewords=0,
+             mpcp_state=0, llid 从未分配，每 3.5s 刷
+             "optical signal present without XGTC sync"
+     修复后：rx_control_raw=0x80810302, pcs_sync=1,
+             all_codewords=101128978, uncorrected_codewords=0,
+             MPCP 注册成功 LLID=0x19，lifecycle=operational
+
+   10G-EPON 的注册面本就是 MPCP + OAM（见 mode 表 control_protocol=OAM），
+   而 epon.c 已完整实现 16 队列上报、U10G_TX_MODE、10G TRX 调整、
+   XEPON PCS RX 使能与 MPCP 状态机，无需改动。
+
+2) GPON 的 recv_ploamd 对 FIFO 状态无上限保护
+
+   光纤接入时 PLOAMD_FIFO_STATUS 低字节实测读到 0xef（非法值）。原循环
+   以 rc > 3 为条件反复读 FIFO 数据寄存器且永不返回，link_work 卡死，
+   触发 rcu_sched self-detected stall 并把整机拖死（load 19，SSH 无响应）。
+
+   加两层防护：
+     - 状态超过合理上限（0x20）直接返回 -EIO，视为寄存器异常
+     - 单次调用最多处理 8 帧，避免状态位卡在高位时死循环
+
+   实测：修复后 GPON 模式 rcu_sched stall 计数为 0，load 0.03。
+
+---
+diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
+index cbe3e27..5bea544 100644
+--- a/airoha-xpon/src/airoha-xpon-gpon.c
++++ b/airoha-xpon/src/airoha-xpon-gpon.c
+@@ -60,6 +60,10 @@ enum airoha_gpon_state {
+ #define AIROHA_GPON_PLOAMD_BAD		1	/* 1、2 视为不完整 */
+ #define AIROHA_GPON_PLOAMD_BAD_MAX	2
+ #define AIROHA_GPON_PLOAMD_MAX		3	/* 一次最多处理到剩 3 条 */
++/* 状态寄存器合理上限：真实 FIFO 深度远小于此值，超过即视为寄存器异常 */
++#define AIROHA_GPON_PLOAMD_SANE_MAX	0x20
++/* 单次调用最多处理的帧数：防止状态位卡在高位导致死循环 */
++#define AIROHA_GPON_PLOAMD_BURST	8
+ 
+ /* PLOAM 报文固定 12 字节 = 3 个 32-bit 字 */
+ #define AIROHA_GPON_PLOAM_WORDS		3
+@@ -665,6 +669,14 @@ int airoha_xpon_gpon_get_ploamd(struct airoha_xpon *xpon, u8 *out)
+ 	if (status <= AIROHA_GPON_PLOAMD_BAD_MAX)
+ 		return -EINVAL;			/* 1、2 条视为不完整 */
+ 
++	/*
++	 * 状态位可能读到无效值（实测光纤接入时读到 0xef）。此时若照常循环，
++	 * 会在每次 link_work 里反复读 FIFO 数据寄存器，把 CPU 拖进 RCU stall，
++	 * 最终整个系统卡死。直接判定为异常返回。
++	 */
++	if (status > AIROHA_GPON_PLOAMD_SANE_MAX)
++		return -EIO;
++
+ 	for (j = 0; j < AIROHA_GPON_PLOAM_WORDS; j++) {
+ 		u32 w = gpon_rd(xpon, AIROHA_GPON_PLOAMD_FIFO_DATA);
+ 
+@@ -1040,12 +1052,21 @@ void airoha_xpon_gpon_recv_ploamd(struct airoha_xpon *xpon)
+ {
+ 	struct airoha_gpon_priv *priv = gpon_priv(xpon);
+ 	u8 msg[AIROHA_GPON_PLOAM_BYTES];
++	unsigned int burst = 0;
+ 	int rc;
+ 
+ 	if (!xpon->gpon_ploam_ready)
+ 		return;
+ 
+ 	do {
++		/*
++		 * 每轮都重新读状态，且硬性限制轮数：某些情况下 FIFO 状态位会
++		 * 卡在非零值不再下降（光纤接入时实测 0xef），无上限循环会让
++		 * link_work 永不返回，触发 RCU stall 并拖死整机。
++		 */
++		if (burst++ >= AIROHA_GPON_PLOAMD_BURST)
++			break;
++
+ 		rc = airoha_xpon_gpon_get_ploamd(xpon, msg);
+ 		if (rc <= 0)
+ 			break;
+@@ -1656,9 +1677,10 @@ EXPORT_SYMBOL_GPL(airoha_xpon_gpon_start_rx);
+ 
+ void airoha_xpon_gpon_stop_rx(struct airoha_xpon *xpon)
+ {
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++
+ 	/* MAC 即将停用：先撤销「可用」标志，让 IRQ/PLOAM 路径立即停止受理 */
+ 	xpon->mac_initialized = false;
+-	struct airoha_gpon_priv *priv = gpon_priv(xpon);
+ 
+ 	if (!xpon->gpon_base || !priv)
+ 		return;
+diff --git a/airoha-xpon/src/airoha-xpon-proto.c b/airoha-xpon/src/airoha-xpon-proto.c
+index 9fb131f..6743ab5 100644
+--- a/airoha-xpon/src/airoha-xpon-proto.c
++++ b/airoha-xpon/src/airoha-xpon-proto.c
+@@ -34,10 +34,20 @@ airoha_xpon_proto_for_mode(enum airoha_xpon_mode mode)
+ 		return &airoha_xpon_gpon_ops;
+ 	case AIROHA_XPON_MODE_XGPON:
+ 	case AIROHA_XPON_MODE_XGSPON:
+-	case AIROHA_XPON_MODE_EPON_10G_1G:
+-	case AIROHA_XPON_MODE_EPON_10G_10G:
+ 		return &airoha_xpon_xgpon_ops;
++	/*
++	 * 10G-EPON 必须走 EPON 协议栈，不能走 XG-PON。
++	 *
++	 * 下行 10G 由 XEPON PCS 承载，只有 epon.c 的 start_rx 才会写
++	 * XEPON_PCS_RX_CTRL = 0x80810302（RX_ENABLE）；走 XG-PON 路径时该寄存器
++	 * 一直是 0x80810300（RX_DISABLE），PCS 收到 0 个码字、永不同步。
++	 *
++	 * 另外 10G-EPON 的注册面是 MPCP + OAM（见 mode 表 control_protocol），
++	 * 由 epon.c 实现；xgpon_ops 只做 XGTC/PLOAM/OMCI，根本不会有注册动作。
++	 */
+ 	case AIROHA_XPON_MODE_EPON_1G:
++	case AIROHA_XPON_MODE_EPON_10G_1G:
++	case AIROHA_XPON_MODE_EPON_10G_10G:
+ 		return &airoha_xpon_epon_ops;
+ 	default:
+ 		return NULL;
