@@ -1,0 +1,86 @@
+Subject: net: pcs: airoha: add GPON / EPON 1G PON mode support (experiment)
+
+GPON 下行 2.48832G、EPON 1G 下行 1.25G。SerDes 的 2500BASEX/SGMII
+分支本就齐全，缺的只是 PON 模式到速率的映射：
+
+1. pcs-airoha-common.c: GPON -> HSGMII + 2500BASEX，EPON_1G -> HSGMII + SGMII
+2. pcs-an7581.c: first_plug 放行 2500BASEX/SGMII（10G 三档不变）
+3. pcs-an7581.c: TXPLL 频率字按 1/4、1/8 推算（0x01fdaaa2 / 0x00fed555），
+   实测两种速率 PLL 均锁定（PrCal lock=1、calibration_error=0）
+---
+--- a/drivers/net/pcs/airoha/pcs-airoha-common.c
++++ b/drivers/net/pcs/airoha/pcs-airoha-common.c
+@@ -236,6 +236,27 @@
+ 		xsi_sel = AIROHA_SCU_PON_XSI_USXGMII;
+ 		rx_interface = PHY_INTERFACE_MODE_10GBASER;
+ 		break;
++
++	/*
++	 * EXPERIMENT: 1G/2.5G PON rate
++	 *
++	 * GPON 下行 2.48832G、EPON 1G 下行 1.25G，都远低于 10G。SerDes 本身
++	 * 支持这两档（an7581_pcs_rx_bringup 里 SGMII=1.25G、2500BASEX=2.5G
++	 * 分支齐全，PON 与以太网共用同一套），缺的只是这里把模式映射到速率。
++	 *
++	 * WAN_SEL 暂时沿用 XG-PON 的 9：先验证"SerDes 能否在 2.5G/1.25G 上
++	 * 完成配置与校准"，通道号另行实验确定。
++	 */
++	case AIROHA_PCS_PON_MODE_GPON:
++		wan_sel = FIELD_PREP(AIROHA_SCU_WAN_SEL, 9);
++		xsi_sel = AIROHA_SCU_PON_XSI_HSGMII;
++		rx_interface = PHY_INTERFACE_MODE_2500BASEX;
++		break;
++	case AIROHA_PCS_PON_MODE_EPON_1G:
++		wan_sel = FIELD_PREP(AIROHA_SCU_WAN_SEL, 9);
++		xsi_sel = AIROHA_SCU_PON_XSI_HSGMII;
++		rx_interface = PHY_INTERFACE_MODE_SGMII;
++		break;
+ 	default:
+ 		return -EINVAL;
+ 	}
+--- a/drivers/net/pcs/airoha/pcs-an7581.c
++++ b/drivers/net/pcs/airoha/pcs-an7581.c
+@@ -2298,7 +2298,24 @@
+ 	APPLY_XGPON_TABLE(an7581_xgpon_ana);
+ 	APPLY_XGPON_TABLE(an7581_xgpon_cfg_post);
+ 
+-	if (priv->pon_mode == AIROHA_PCS_PON_MODE_XGSPON) {
++	/*
++	 * EXPERIMENT: 1G/2.5G PON rate
++	 *
++	 * TXPLL 相位控制字与频率成正比（9.95328G=0x07f66e86，
++	 * 10.3125G=0x08400000，两者比值 1.0356 对频率比 1.0361）。按此推算：
++	 *   GPON 2.48832G = 9.95328G/4 -> 0x07f66e86/4 = 0x01fdaaa2
++	 *   EPON 1.25G    = 9.95328G/8 -> 0x07f66e86/8 = 0x00fed555
++	 * 若 PLL 落在不同 VCO 频段，此值需按实测修正。
++	 */
++	if (priv->pon_mode == AIROHA_PCS_PON_MODE_GPON) {
++		regmap_update_bits(pma, 0x798, GENMASK(30, 0), 0x01fdaaa2);
++		regmap_update_bits(pma, 0x048, GENMASK(30, 0), 0x01fdaaa2);
++		regmap_update_bits(pma, 0x04c, GENMASK(30, 0), 0x01fdaaa2);
++	} else if (priv->pon_mode == AIROHA_PCS_PON_MODE_EPON_1G) {
++		regmap_update_bits(pma, 0x798, GENMASK(30, 0), 0x00fed555);
++		regmap_update_bits(pma, 0x048, GENMASK(30, 0), 0x00fed555);
++		regmap_update_bits(pma, 0x04c, GENMASK(30, 0), 0x00fed555);
++	} else if (priv->pon_mode == AIROHA_PCS_PON_MODE_XGSPON) {
+ 		/* XPON_TX(Sync_XGSPON) uses a 16-bit bus and 9.95328G upstream clock. */
+ 		regmap_update_bits(pma, 0x77c, GENMASK(19, 16), 5 << 16);
+ 		regmap_update_bits(pma, 0x784, GENMASK(1, 0), 2);
+@@ -3168,7 +3185,16 @@
+ 	 */
+ 	if (priv->data->port_type != AIROHA_PCS_PON)
+ 		return -EOPNOTSUPP;
+-	if (interface != PHY_INTERFACE_MODE_10GBASER)
++	/*
++	 * EXPERIMENT: 1G/2.5G PON rate
++	 *
++	 * 原注释写的是"HAL 按 line mode 选 PMA 速率，其余模式都走这套
++	 * FIRST_PLUG_IN 序列"，但代码只放行 10GBASER。GPON/EPON-1G 需要
++	 * 2.5G/1.25G，这里放开对应接口；10G 三档行为完全不变。
++	 */
++	if (interface != PHY_INTERFACE_MODE_10GBASER &&
++	    interface != PHY_INTERFACE_MODE_2500BASEX &&
++	    interface != PHY_INTERFACE_MODE_SGMII)
+ 		return -EOPNOTSUPP;
+ 
+ 	priv->pon_last_error = 0;
