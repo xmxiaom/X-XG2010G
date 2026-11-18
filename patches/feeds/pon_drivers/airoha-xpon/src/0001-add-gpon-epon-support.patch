@@ -7006,3 +7006,38 @@ index 0000000..262ddb1
 +
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION("Airoha xPON statistics via debugfs");
+diff --git a/airoha-xpon/src/airoha-xpon-xgpon.c b/airoha-xpon/src/airoha-xpon-xgpon.c
+index 3ded455..020e4ba 100644
+--- a/airoha-xpon/src/airoha-xpon-xgpon.c
++++ b/airoha-xpon/src/airoha-xpon-xgpon.c
+@@ -665,9 +665,27 @@ int airoha_xpon_xgpon_start_rx(struct airoha_xpon *xpon)
+ 	u32 onu_id;
+ 	int ret;
+ 
+-	pcs_mode = xpon->active_mode == AIROHA_XPON_MODE_XGSPON ?
+-	                   AIROHA_PCS_PON_MODE_XGSPON :
+-	                   AIROHA_PCS_PON_MODE_XGPON;
++	/*
++	 * XG-PON / XGS-PON / 10G-EPON 共用这一套 MAC 实现（见 proto_for_mode），
++	 * 它们的差别只在 PCS 档位。这里必须逐个模式映射，不能只区分 XGS-PON 与
++	 * 其余 —— 早先写成 "是不是 XGSPON" 的二选一，10G-EPON 两档会掉进 XG-PON
++	 * 分支，用错 SerDes 通道（WAN_SEL 9 而非 6/7），且 pcs_profile 记成 xgpon，
++	 * 与 active_mode 不匹配，诊断节点因此一直报 available 0。
++	 */
++	switch (READ_ONCE(xpon->active_mode)) {
++	case AIROHA_XPON_MODE_XGSPON:
++		pcs_mode = AIROHA_PCS_PON_MODE_XGSPON;
++		break;
++	case AIROHA_XPON_MODE_EPON_10G_1G:
++		pcs_mode = AIROHA_PCS_PON_MODE_EPON_10G_1G;
++		break;
++	case AIROHA_XPON_MODE_EPON_10G_10G:
++		pcs_mode = AIROHA_PCS_PON_MODE_EPON_10G_10G;
++		break;
++	default:
++		pcs_mode = AIROHA_PCS_PON_MODE_XGPON;
++		break;
++	}
+ 	retrain = xpon->pcs_profile_valid && xpon->pcs_profile == pcs_mode;
+ 	if (!retrain) {
+ 		ret = airoha_pcs_pon_config_rx(
