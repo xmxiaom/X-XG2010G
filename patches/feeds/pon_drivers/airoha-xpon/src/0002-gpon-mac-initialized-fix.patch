@@ -1,0 +1,57 @@
+--- a/airoha-xpon/src/airoha-xpon-gpon.c
++++ b/airoha-xpon/src/airoha-xpon-gpon.c
+@@ -1620,6 +1620,27 @@
+ 	 * 初值为 O1，可以过；若是从 O5 掉线恢复，应先走 detect_los_lof
+ 	 * 把状态退回 O1，不能直接调 start_rx。
+ 	 */
++	/*
++	 * EXPERIMENT: 1G/2.5G PON rate
++	 *
++	 * GPON 下行 2.48832G，SerDes 必须按 2.5G 档配置。原先 GPON 只初始化
++	 * 自己的 MAC，从不碰 PON PCS —— PCS 停在 10G 档，收不到 2.488G 的
++	 * 下行帧。这里在使能 MAC 之前先把 PCS 配好。
++	 */
++	if (xpon->pcs) {
++		ret = airoha_pcs_pon_config_rx(
++			xpon->pcs, AIROHA_PCS_PON_MODE_GPON,
++			xpon->frontend_link.pma_xpon_setting0,
++			xpon->frontend_link.pma_xpon_setting1);
++		if (ret) {
++			dev_err(xpon->dev,
++				"GPON PON PCS configuration failed: %d\n", ret);
++			return ret;
++		}
++		xpon->pcs_profile = AIROHA_PCS_PON_MODE_GPON;
++		xpon->pcs_profile_valid = true;
++	}
++
+ 	ret = airoha_xpon_gpon_enable(xpon);
+ 	if (ret) {
+ 		dev_err(xpon->dev, "gpon enable failed: %d\n", ret);
+@@ -1635,6 +1656,8 @@
+ 
+ void airoha_xpon_gpon_stop_rx(struct airoha_xpon *xpon)
+ {
++	/* MAC 即将停用：先撤销「可用」标志，让 IRQ/PLOAM 路径立即停止受理 */
++	xpon->mac_initialized = false;
+ 	struct airoha_gpon_priv *priv = gpon_priv(xpon);
+ 
+ 	if (!xpon->gpon_base || !priv)
+@@ -3776,6 +3799,17 @@
+ 	 */
+ 	airoha_xpon_gpon_set_encrypt_key(xpon, priv->aes_key);
+ 
++	/*
++	 * MAC 已就绪：ISR 已注册、GEM/DBA 已完成初始化。
++	 *
++	 * 这个标志是上层判断「MAC 能不能用」的唯一依据：
++	 *   - airoha_xpon_irq_thread() 拿它决定要不要处理 MAC 中断，
++	 *   - ploam 层拿它决定要不要接 PLOAMd。
++	 * EPON 与 XG-PON 各自在 start_rx 里置位，GPON 此前漏了这一步，
++	 * 结果是中断全部被 IRQ_NONE 丢掉、PLOAMd 不解，即使有光也注册不上。
++	 */
++	xpon->mac_initialized = true;
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(airoha_xpon_gpon_enable);
