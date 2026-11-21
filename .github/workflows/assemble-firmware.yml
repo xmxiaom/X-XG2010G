@@ -1,0 +1,79 @@
+name: Assemble firmware from parts
+
+# 大固件无法一次性上传（uploads.github.com 会在大约 140–200 秒后重置连接）。
+# 本地按 6 MB 切片上传到 Release，由本工作流在 GitHub 侧下载、合并、校验、
+# 上传为单个 .itb，最后删除所有分片。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag'
+        required: true
+      target_name:
+        description: 'Final asset filename'
+        required: true
+      expected_sha256:
+        description: 'Expected SHA256 of the assembled file'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download parts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p parts
+          gh release download "${{ inputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "*.part[0-9][0-9]" \
+            --dir parts
+          echo "--- 分片清单 ---"
+          ls -l parts
+
+      - name: Concatenate and verify
+        run: |
+          set -euo pipefail
+          cd parts
+          ls *.part[0-9][0-9] | sort > /tmp/list.txt
+          echo "--- 合并顺序 ---"
+          cat /tmp/list.txt
+          cat $(cat /tmp/list.txt) > "${{ inputs.target_name }}"
+          ls -l "${{ inputs.target_name }}"
+          ACTUAL=$(sha256sum "${{ inputs.target_name }}" | awk '{print $1}')
+          echo "actual   = $ACTUAL"
+          echo "expected = ${{ inputs.expected_sha256 }}"
+          if [ "$ACTUAL" != "${{ inputs.expected_sha256 }}" ]; then
+            echo "::error::SHA256 mismatch, aborting"
+            exit 1
+          fi
+          echo "SHA256_OK"
+
+      - name: Upload merged firmware
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ inputs.tag }}" \
+            "parts/${{ inputs.target_name }}" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          echo "UPLOADED"
+
+      - name: Delete parts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "${{ inputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" --json assets \
+            --jq '.assets[].name' | grep -E '\.part[0-9][0-9]$' | while read -r n; do
+              echo "deleting $n"
+              gh release delete-asset "${{ inputs.tag }}" "$n" \
+                --repo "$GITHUB_REPOSITORY" -y
+            done
+          echo "CLEANED"
