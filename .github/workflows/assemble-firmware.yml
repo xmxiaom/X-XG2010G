@@ -31,7 +31,7 @@ jobs:
           mkdir -p parts
           gh release download "${{ inputs.tag }}" \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern "*.part[0-9][0-9]" \
+            --pattern "*.part[0-9][0-9][0-9]" \
             --dir parts
           echo "--- 分片清单 ---"
           ls -l parts
@@ -40,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           cd parts
-          ls *.part[0-9][0-9] | sort > /tmp/list.txt
+          ls *.part[0-9][0-9][0-9] | sort > /tmp/list.txt
           echo "--- 合并顺序 ---"
           cat /tmp/list.txt
           cat $(cat /tmp/list.txt) > "${{ inputs.target_name }}"
@@ -71,7 +71,7 @@ jobs:
           set -euo pipefail
           gh release view "${{ inputs.tag }}" \
             --repo "$GITHUB_REPOSITORY" --json assets \
-            --jq '.assets[].name' | grep -E '\.part[0-9][0-9]$' | while read -r n; do
+            --jq '.assets[].name' | grep -E '\.part[0-9][0-9][0-9]$' | while read -r n; do
               echo "deleting $n"
               gh release delete-asset "${{ inputs.tag }}" "$n" \
                 --repo "$GITHUB_REPOSITORY" -y
