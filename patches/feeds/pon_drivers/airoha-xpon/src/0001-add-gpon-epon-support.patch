@@ -74,10 +74,10 @@ index 9ef7e85..5e3f484 100644
  	&dev_attr_service_ready.attr,
 diff --git a/airoha-xpon/src/airoha-xpon-epon-hw.c b/airoha-xpon/src/airoha-xpon-epon-hw.c
 new file mode 100644
-index 0000000..56b7f3a
+index 0000000..169f9b7
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-epon-hw.c
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,588 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 EPON —— 原厂寄存器初始化序列 + 协议操作表
@@ -335,10 +335,11 @@ index 0000000..56b7f3a
 +			((u32)key[i * 4 + 2] << 8) |
 +			 (u32)key[i * 4 + 3];
 +
-+		/* 索引 = LLID + 方向 + 第几个字 */
-+		ctrl = FIELD_PREP(AIROHA_EPON_KEY_LLID, llid) |
++		/* 索引寄存器编码：KEY_LLID(6 位) = llid(低 3 位) | 字序(高 2 位)，
++		 * KEY_DIR 独立位，TRIGGER 触发写入。此前同一字段 PREP 两次
++		 * 属残留，第二次覆盖第一次，删除后 ctrl 值不变。 */
++		ctrl = FIELD_PREP(AIROHA_EPON_KEY_LLID, (llid & 0x7) | ((i & 0x3) << 3)) |
 +		       FIELD_PREP(AIROHA_EPON_KEY_DIR, dir) |
-+		       FIELD_PREP(AIROHA_EPON_KEY_LLID, (llid & 0x7) | ((i & 0x3) << 3)) |
 +		       AIROHA_EPON_KEY_TRIGGER;
 +
 +		epon_hw_wr(xpon, AIROHA_EPON_LLID_KEY_DATA, w);
@@ -492,15 +493,26 @@ index 0000000..56b7f3a
 + * @xpon: XPON 设备
 + * @mask: 位图，bit n 置位表示使能 LLID n
 + *
-+ * 原厂 eponMacSetLlidEnableMask 直接写掩码寄存器。
++ * 原厂语义（反汇编 xpon.ko eponMacSetLlidEnableMask @0x3e41c，10G 版
++ * @0x3923c 走 UNION_IC_FUNCTION_HOOK(27)）：
++ *   1. 把 mask 整只传给 eponMacSetTxbufUsage（活跃 LLID 数驱动的缓冲分配）
++ *   2. 逐位比较新旧掩码，仅对变化的 LLID 调 eponLlidEnable/disable(i)
++ * 不写任何"掩码寄存器"——此前往 LLID_KEY_CTRL(0x0058) 的 KEY_LLID 字段
++ * 写掩码的实现会踩坏密钥索引字，已按反汇编结论移除。
++ *
++ * 当前 EPON AES / LLID 使能路径未接到用户态，且 eponLlidEnable 依赖的
++ * 每-LLID 80 字节私有结构（base+0x1eef0 大窗口）不在本驱动的 4KB epon
++ * 映射内，故此处只做软件记录，寄存器级实现待窗口映射补齐。
 + */
 +int airoha_epon_hw_set_llid_enable_mask(struct airoha_xpon *xpon, u8 mask)
 +{
 +	if (!xpon->epon_base)
 +		return -ENODEV;
 +
-+	epon_hw_wr(xpon, AIROHA_EPON_LLID_KEY_CTRL,
-+		   FIELD_PREP(AIROHA_EPON_KEY_LLID, mask & 0x3f));
++	dev_info(xpon->dev,
++		 "llid enable mask 0x%02x recorded (register-level enable "
++		 "needs the full epon window, see eponLlidEnable@0x30a10)\n",
++		 mask);
 +	return 0;
 +}
 +EXPORT_SYMBOL_GPL(airoha_epon_hw_set_llid_enable_mask);
@@ -605,18 +617,23 @@ index 0000000..56b7f3a
 +/**
 + * airoha_epon_hw_set_txbuf_usage - 设置 TX buffer 使用率
 + * @xpon:  XPON 设备
-+ * @usage: 使用率（0..100）
++ * @usage: 活跃 LLID 数量（0..8）——反汇编证实 eponMacSetTxbufUsage
++ *         @0x3e2c4 对 mask 做 popcount 后把计数写入私有结构 +0x20，
++ *         再按计数（>1 / ==1）走不同的发送缓冲分配序列，涉及
++ *         base+0x1eef0 的大窗口，不在本驱动的 4KB epon 映射内。
 + *
-+ * 原厂 eponMacSetTxbufUsage，被 eponMacSetLlidEnableMask 调用。
-+ * 控制发送缓冲的占用上限，避免缓冲耗尽导致丢包。
++ * ⚠ 此前写 LLID_FEC_CTRL(0x0020) GENMASK(15,8) 的实现与原厂语义
++ *   不符（"usage" 实为活跃 LLID 计数，且落点不在 FEC 寄存器），
++ *   已按反汇编结论改为软件记录，寄存器级实现待窗口映射补齐。
 + */
 +int airoha_epon_hw_set_txbuf_usage(struct airoha_xpon *xpon, u32 usage)
 +{
 +	if (!xpon->epon_base)
 +		return -ENODEV;
 +
-+	epon_hw_wr(xpon, AIROHA_EPON_LLID_FEC_CTRL,
-+		   FIELD_PREP(GENMASK(15, 8), usage & 0xff));
++	dev_info(xpon->dev,
++		 "txbuf usage %u recorded (needs the full epon window, see "
++		 "eponMacSetTxbufUsage@0x3e2c4)\n", usage);
 +	return 0;
 +}
 +EXPORT_SYMBOL_GPL(airoha_epon_hw_set_txbuf_usage);
@@ -952,7 +969,7 @@ index 0000000..1af4df4
 +
 +#endif /* _AIROHA_XPON_EPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-epon.c b/airoha-xpon/src/airoha-xpon-epon.c
-index 4950cfc..e90c48e 100644
+index 4950cfc..8e9295c 100644
 --- a/airoha-xpon/src/airoha-xpon-epon.c
 +++ b/airoha-xpon/src/airoha-xpon-epon.c
 @@ -413,6 +413,17 @@ static int airoha_xpon_epon_start_mac(struct airoha_xpon *xpon)
@@ -1017,7 +1034,7 @@ index 4950cfc..e90c48e 100644
 +
 +	/*
 +	 * 3. 重新启动 MAC（含完整初始化表 + SCU 复位序列）。
-+	 *    这一步会重新应用 349 条表并重新 program_mac。
++	 *    这一步会重新应用 3 条 TRX/TX_FETCH 寄存器并执行 SCU 复位序列（349 条初始化表已于 2026-11-18 实测后删除）。
 +	 */
 +	ret = airoha_xpon_epon_start_mac(xpon);
 +	if (ret) {
@@ -1221,10 +1238,10 @@ index 0000000..700b440
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..7f24556
+index 0000000..3bd1c47
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,3970 @@
+@@ -0,0 +1,3975 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1933,9 +1950,11 @@ index 0000000..7f24556
 +		return -EIO;
 +
 +	for (j = 0; j < AIROHA_GPON_PLOAM_WORDS; j++) {
-+		u32 w = gpon_rd(xpon, AIROHA_GPON_PLOAMD_FIFO_DATA);
++		/* 逐字节写回（与 send_ploamu 的写侧修复对称）——out 是
++		 * 栈上 u8 数组，u32* 强转在 arm64 是未对齐访问 UB */
++		u32 w = swab32(gpon_rd(xpon, AIROHA_GPON_PLOAMD_FIFO_DATA));
 +
-+		((u32 *)out)[j] = swab32(w);
++		memcpy(out + j * 4, &w, 4);
 +	}
 +
 +	return status;
@@ -2341,6 +2360,9 @@ index 0000000..7f24556
 +/* Dying_Gasp：对端掉电，记录状态 */
 +static int gpon_msg_dying_gasp(struct airoha_xpon *xpon, const u8 *msg)
 +{
++	/* 原厂 0x017c20 的下行 DG 行为未反汇编还原；DG 常规方向是
++	 * ONU→OLT（见 send_ploamu 的掉电上报）。这里保持记录并在
++	 * last_ploamd 中可回溯，不影响注册流程。 */
 +	dev_info(xpon->dev, "OLT sent Dying_Gasp\n");
 +	return 0;
 +}
