@@ -9,6 +9,69 @@ index b7abf5b..e9dcd15 100644
 -	airoha-xpon-leds.o
 +	airoha-xpon-leds.o \
 +	airoha-xpon-proto.o airoha-xpon-gpon.o airoha-xpon-epon-hw.o
+diff --git a/airoha-xpon/src/airoha-xpon-control.c b/airoha-xpon/src/airoha-xpon-control.c
+index 9ef7e85..5e3f484 100644
+--- a/airoha-xpon/src/airoha-xpon-control.c
++++ b/airoha-xpon/src/airoha-xpon-control.c
+@@ -10,6 +10,7 @@
+ 
+ #include "airoha-xpon-private.h"
+ #include "airoha-xpon-epon.h"
++#include "airoha-xpon-gpon.h"
+ 
+ static size_t airoha_xpon_trimmed_length(const char *buf, size_t count)
+ {
+@@ -159,6 +160,42 @@ static ssize_t active_serial_number_show(struct device *dev,
+ }
+ static DEVICE_ATTR_RO(active_serial_number);
+ 
++/* GPON PLOAM Password（0x05）的应答内容：10 字节 ASCII，不足补 0。
++ * "default" 恢复为未配置（回全 0）。0600 与身份属性同级保护。 */
++static ssize_t gpon_sn_passwd_show(struct device *dev,
++                                   struct device_attribute *attr, char *buf)
++{
++	struct airoha_xpon *xpon = dev_get_drvdata(dev);
++	const char *pwd = airoha_xpon_gpon_sn_passwd(xpon);
++
++	if (!pwd)
++		return sysfs_emit(buf, "default-zero\n");
++	return sysfs_emit(buf, "%s\n", pwd);
++}
++
++static ssize_t gpon_sn_passwd_store(struct device *dev,
++                                    struct device_attribute *attr,
++                                    const char *buf, size_t count)
++{
++	struct airoha_xpon *xpon = dev_get_drvdata(dev);
++	size_t len = airoha_xpon_trimmed_length(buf, count);
++	int ret;
++
++	if (sysfs_streq(buf, "default")) {
++		ret = airoha_xpon_gpon_set_sn_passwd(xpon, NULL, 0);
++		if (ret)
++			return ret;
++		return count;
++	}
++
++	ret = airoha_xpon_gpon_set_sn_passwd(xpon, buf, len);
++	if (ret)
++		return ret;
++	return count;
++}
++static DEVICE_ATTR(gpon_sn_passwd, 0600, gpon_sn_passwd_show,
++                   gpon_sn_passwd_store);
++
+ static ssize_t omci_msk_store(struct device *dev, struct device_attribute *attr,
+                               const char *buf, size_t count)
+ {
+@@ -339,6 +376,7 @@ static struct attribute *airoha_xpon_attrs[] = {
+ 	&dev_attr_serial_number.attr,
+ 	&dev_attr_active_serial_number.attr,
+ 	&dev_attr_registration_id.attr,
++	&dev_attr_gpon_sn_passwd.attr,
+ 	&dev_attr_omci_msk.attr,
+ 	&dev_attr_data_path.attr,
+ 	&dev_attr_service_ready.attr,
 diff --git a/airoha-xpon/src/airoha-xpon-epon-hw.c b/airoha-xpon/src/airoha-xpon-epon-hw.c
 new file mode 100644
 index 0000000..56b7f3a
@@ -1158,10 +1221,10 @@ index 0000000..700b440
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..21f72e9
+index 0000000..7f24556
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,3963 @@
+@@ -0,0 +1,3970 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1454,7 +1517,7 @@ index 0000000..21f72e9
 +	/* GPON AES-128 加密密钥（原厂 gponDevSetEncryptKey，16 字节） */
 +	u8			aes_key[16];
 +	/* 国内移动 PLOAM Password（10 字符 ASCII，不足补 0） */
-+	char			sn_passwd[10];
++	char			sn_passwd[11];	/* 10 字符 + NUL */
 +	bool			sn_passwd_set;
 +	/* BER / SD / SF 检测状态（原厂 gpon_ber_interval_expires） */
 +	bool			sd_flag;
@@ -2044,7 +2107,7 @@ index 0000000..21f72e9
 +	up[0] = AIROHA_GPON_PLOAMU_SEND | (xpon->gpon_onu_id & 0x7f);
 +	up[1] = AIROHA_GPON_PLOAMU_MSG_PASSWORD;
 +	if (priv->sn_passwd_set)
-+		memcpy(&up[2], priv->sn_passwd, sizeof(priv->sn_passwd));
++		memcpy(&up[2], priv->sn_passwd, 10);	/* PLOAM Password 载荷固定 10 字节 */
 +
 +	airoha_xpon_gpon_send_ploamu(xpon, up, 1);
 +	dev_dbg(xpon->dev, "downstream password acknowledged (set=%d)\n",
@@ -4448,7 +4511,14 @@ index 0000000..21f72e9
 +	if (!priv)
 +		return -ENODEV;
 +
-+	if (!pwd || len > 10)
++	if (!pwd || !len) {
++		/* NULL/空长度 = 清除为未配置（0x05 回全 0） */
++		memset(priv->sn_passwd, 0, sizeof(priv->sn_passwd));
++		priv->sn_passwd_set = false;
++		return 0;
++	}
++
++	if (len > 10)
 +		return -EINVAL;
 +
 +	memset(priv->sn_passwd, 0, sizeof(priv->sn_passwd));
