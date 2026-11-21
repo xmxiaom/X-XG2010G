@@ -116,8 +116,36 @@ immortalwrt-<name>-YYYYMMDD-<repo-hash>-airoha-an7581-gemtek_xg2010g-ubi-squashf
 | 逆向工具（capstone + pyelftools） | [`tools/re_xpon.py`](tools/re_xpon.py) · [`tools/re_ehframe.py`](tools/re_ehframe.py) |
 
 > 当前状态：寄存器层已完整还原并通过交叉验证；函数边界已由 `.eh_frame` 的 FDE 恢复（1634 个函数）。
-> 唯一实质缺口是内核侧 GTC/PLOAM 的实现（约 900–1000 行）。
 > 用户态 OMCI 已支持 CTC LOID ME，四大运营商的认证配置无需额外开发。
+
+### 内核实现现状（v1.1.0）
+
+GPON 内核侧已经跑通"注册 → 业务面 → OMCI 管理"的完整软件链路，尚未在真实 OLT 上验证。
+
+| 层次 | 实现 | 说明 |
+|---|---|---|
+| **GTC** | 硬件 | 帧同步、BWmap 解析、突发组帧（保护位/前导/定界符）、超帧计数全部由 AN7581 MAC 完成，驱动只写参数、收中断、累加 MIB，与原厂 `xpon.ko` 分工一致 |
+| **PLOAM 下行** | 12 条 | `0x01/03/04/05/06/08/09/0a/0c/0d/0e/0f`；`0x02`、`0x07` 与原厂一致留空 |
+| **PLOAM 上行** | 5 类 | Serial_Number(0x01)、Password(0x02)、Key_Report(0x05)、Key_Switching_Time(0x09)、Dying_Gasp |
+| **注册链路** | 完整 | SN 每 200 ms 周期上报（O2/O3）→ Assign_ONU_ID（VSSN 比对）→ EqD 测距 → O5 |
+| **加密** | 完整 | AES-128 影子密钥（反序 4 段写入）+ 超帧定时软切换 |
+| **FEC** | 完整 | `xgpon+0x868` bit[1:0]，GPON 默认"仅上行"（原厂 `gpon_dev_init` 同值） |
+| **OMCI 通道** | 完整 | OMCC GEM 默认 1，O5 时置 ready；QDMA 按描述符 bit30 识别 OMCI 帧 |
+| **数据面** | 硬件直通 | GEM 由硬件解出走 PPE，驱动只维护 GEM 解密表与 Alloc-ID |
+
+**已知未覆盖**：`0x0c PEE` / `0x0e BER_Interval` 只记录不回应；`0x0b`（如果有）与 BER 主动上报未实现。
+GPON 全部验证均在主机侧模拟完成（3 轮 × 438 断言），真机行为待上机确认。
+
+### 诊断接口
+
+| 接口 | 内容 |
+|---|---|
+| `/sys/kernel/debug/airoha-xpon-pon0/line` | FEC 模式、省电（PEE/PST/BER）、OMCI 通道（omcc_gem / ready / rx / tx / dropped） |
+| `/sys/kernel/debug/airoha-xpon-pon0/mac` | GPON 状态机、ONU-ID、EqD、OMCC GEM |
+| `/sys/class/net/<pon>/gpon_omcc_gem` | 读写 OMCC GEM Port ID（默认 1，现场可调，无需重编） |
+| `/sys/class/net/<pon>/gpon_sn_passwd` | PLOAM Password（10 字符） |
+| `ponctl status --json` | 以上字段的 JSON 形式（`line` 组） |
+| LuCI「状态 → 概览 → PON 光模块」 | "链路增强"卡片：FEC 模式 / 省电 / OMCI 状态 |
 
 ## 致谢
 

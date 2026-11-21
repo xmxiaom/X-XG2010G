@@ -45,7 +45,7 @@ diff --git a/drivers/net/ethernet/airoha/airoha_eth.c b/drivers/net/ethernet/air
  
  #ifdef CONFIG_AIROHA_PON_COMPAT
  #define AIROHA_PON_FE_BASE		0x1fb50000
-@@ -898,6 +903,89 @@
+@@ -898,6 +903,95 @@
  	return 0;
  }
  
@@ -71,7 +71,13 @@ diff --git a/drivers/net/ethernet/airoha/airoha_eth.c b/drivers/net/ethernet/air
 +		return false;
 +
 +	airoha_qdma_decode_pon_control(msg0, &info);
-+	if (info.oam)
++	/*
++	 * bit8  = OAM 帧（EPON）。
++	 * bit30 = 硬件标记的 OMCI 帧（GPON）：原厂 gwan_process_rx_message
++	 *         用同一位置判定 OMCI 并做下行 MIC 校验；QDMA_ETH_RXMSG_NO_MIC_MASK
++	 *         这个命名是早期逆向的误判，语义实为「OMCI 通道帧」。
++	 */
++	if (info.oam || info.no_mic)
 +		return true;
 +
 +	/* The ITU-T path also matches the active OMCC ID for control frames. */

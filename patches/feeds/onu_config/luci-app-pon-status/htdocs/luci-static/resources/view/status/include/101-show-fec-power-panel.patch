@@ -1,6 +1,6 @@
 --- a/luci-app-pon-status/htdocs/luci-static/resources/view/status/include/29a_pon.js
 +++ b/luci-app-pon-status/htdocs/luci-static/resources/view/status/include/29a_pon.js
-@@ -622,6 +622,53 @@
+@@ -622,6 +622,62 @@
  }
  
  /*
@@ -12,7 +12,7 @@
 +function fecPowerPanel(line) {
 +	var FEC_LABEL = { 0: '仅上行', 1: '双向', 2: '关闭', 3: '仅下行' };
 +	var has = line != null && Object.prototype.hasOwnProperty.call(line, 'fec_cfg');
-+	var fec, ps;
++	var fec, ps, omci;
 +
 +	if (!has)
 +		return null;
@@ -23,6 +23,15 @@
 +		ps += ' · M' + line.pst_mode;
 +	if (line.pst_power_shortage)
 +		ps += ' · 掉电';
++
++	/*
++	 * OMCI 通道状态：ready 由驱动在进入 O5 并激活 OMCC 后置位。
++	 * 显示"已就绪 · 收/发"便于判断 OLT 是否真的在管理本 ONU。
++	 */
++	if (Object.prototype.hasOwnProperty.call(line, 'omci_ready'))
++		omci = line.omci_ready
++			? '已就绪 · ' + (Number(line.omci_rx) || 0) + '/' + (Number(line.omci_tx) || 0)
++			: '未建立';
 +
 +	function row(label, value) {
 +		return E('div', { 'style': 'display: flex; align-items: baseline; gap: 6px; flex-wrap: nowrap; white-space: nowrap' }, [
@@ -46,7 +55,7 @@
 +		}, [
 +			row('FEC', fec),
 +			row('省电', ps)
-+		])
++		].concat(omci ? [row('OMCI', omci)] : []))
 +	]);
 +}
 +
@@ -54,7 +63,7 @@
   * The card carries no head strip: the device name and the colored title
   * bar were dropped, so the body row starts directly with the optics
   * figure. The ifacebox wrapper still provides the panel background and
-@@ -642,7 +689,7 @@
+@@ -642,7 +698,7 @@
  				tempStatePanel(item.frontend, onu),
  				voltAmpPanel(item.frontend),
  				ratePanel(item.rate)

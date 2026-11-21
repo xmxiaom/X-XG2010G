@@ -10,7 +10,7 @@ index b7abf5b..e9dcd15 100644
 +	airoha-xpon-leds.o \
 +	airoha-xpon-proto.o airoha-xpon-gpon.o airoha-xpon-epon-hw.o
 diff --git a/airoha-xpon/src/airoha-xpon-control.c b/airoha-xpon/src/airoha-xpon-control.c
-index 9ef7e85..5e3f484 100644
+index 9ef7e85..69a30e1 100644
 --- a/airoha-xpon/src/airoha-xpon-control.c
 +++ b/airoha-xpon/src/airoha-xpon-control.c
 @@ -10,6 +10,7 @@
@@ -64,27 +64,76 @@ index 9ef7e85..5e3f484 100644
  static ssize_t omci_msk_store(struct device *dev, struct device_attribute *attr,
                                const char *buf, size_t count)
  {
-@@ -339,6 +376,7 @@ static struct attribute *airoha_xpon_attrs[] = {
+@@ -335,10 +372,55 @@ static ssize_t service_ready_store(struct device *dev,
+ }
+ static DEVICE_ATTR_RW(service_ready);
+ 
++/*
++ * OMCC GEM：GPON 的 OMCI 通道跑在 GEM 上，Port ID 由 OLT 分配、与 ONU-ID
++ * 无固定关系。默认 1，现场不一致时可直接写这个属性（无需重编固件）。
++ * 例：echo 0x100 > /sys/class/net/pon0/omcc_gem
++ */
++static ssize_t gpon_omcc_gem_show(struct device *dev,
++                                  struct device_attribute *attr, char *buf)
++{
++	struct airoha_xpon *xpon = dev_get_drvdata(dev);
++
++	if (!xpon)
++		return -ENODEV;
++
++	return sysfs_emit(buf, "%u\n", airoha_xpon_gpon_omcc_gem(xpon));
++}
++
++static ssize_t gpon_omcc_gem_store(struct device *dev,
++                                   struct device_attribute *attr,
++                                   const char *buf, size_t count)
++{
++	struct airoha_xpon *xpon = dev_get_drvdata(dev);
++	unsigned int gem;
++	int ret;
++
++	if (!xpon)
++		return -ENODEV;
++
++	ret = kstrtouint(buf, 0, &gem);
++	if (ret)
++		return ret;
++
++	if (gem > 0xfff)
++		return -EINVAL;
++
++	/* OMCI 只在 GPON 线路上有意义，其他模式直接拒绝 */
++	if (!xpon->active_mode_valid || xpon->active_mode != AIROHA_XPON_MODE_GPON)
++		return -ENOLINK;
++
++	ret = airoha_xpon_gpon_set_omcc_gem(xpon, (u16)gem);
++	return ret ? ret : count;
++}
++static DEVICE_ATTR_RW(gpon_omcc_gem);
++
+ static struct attribute *airoha_xpon_attrs[] = {
  	&dev_attr_serial_number.attr,
  	&dev_attr_active_serial_number.attr,
  	&dev_attr_registration_id.attr,
 +	&dev_attr_gpon_sn_passwd.attr,
++	&dev_attr_gpon_omcc_gem.attr,
  	&dev_attr_omci_msk.attr,
  	&dev_attr_data_path.attr,
  	&dev_attr_service_ready.attr,
 diff --git a/airoha-xpon/src/airoha-xpon-diagnostics.c b/airoha-xpon/src/airoha-xpon-diagnostics.c
-index 3e2bed8..2bf9179 100644
+index 3e2bed8..69f7009 100644
 --- a/airoha-xpon/src/airoha-xpon-diagnostics.c
 +++ b/airoha-xpon/src/airoha-xpon-diagnostics.c
-@@ -13,6 +13,7 @@
+@@ -13,6 +13,8 @@
  
  #include "airoha-xpon-private.h"
  #include "airoha-xpon-epon.h"
 +#include "airoha-xpon-gpon.h"
++#include "airoha-xpon-omci.h"
  
  static const char *airoha_xpon_lifecycle_name(enum airoha_xpon_lifecycle state)
  {
-@@ -180,6 +181,30 @@ int airoha_xpon_put_status(struct sk_buff *reply, struct airoha_xpon *xpon)
+@@ -180,6 +182,45 @@ int airoha_xpon_put_status(struct sk_buff *reply, struct airoha_xpon *xpon)
  	    nla_put_string(reply, XPON_LINE_PCS_PROFILE,
  	                   airoha_xpon_pcs_profile_name(xpon->pcs_profile)))
  		goto out;
@@ -111,11 +160,26 @@ index 3e2bed8..2bf9179 100644
 +				       power.ber_interval))
 +				goto out;
 +		}
++
++		/* OMCI 通道状态：前端据此显示"OMCI 已就绪/未建立" */
++		if (xpon->omci) {
++			struct airoha_xpon_omci_stats omci = {};
++
++			airoha_xpon_omci_get_stats(xpon->omci, &omci);
++			if (nla_put_u32(reply, XPON_LINE_OMCC_GEM, omci.omcc_id) ||
++			    nla_put_u8(reply, XPON_LINE_OMCI_READY, omci.ready) ||
++			    nla_put_u8(reply, XPON_LINE_OMCI_RUNNING, omci.running) ||
++			    nla_put_u32(reply, XPON_LINE_OMCI_RX, omci.rx_packets) ||
++			    nla_put_u32(reply, XPON_LINE_OMCI_TX, omci.tx_packets) ||
++			    nla_put_u32(reply, XPON_LINE_OMCI_DROPPED,
++				       omci.rx_dropped + omci.tx_dropped))
++				goto out;
++		}
 +	}
  	nla_nest_end(reply, group);
  
  	group = nla_nest_start(reply, AIROHA_XPON_ATTR_FRONTEND);
-@@ -371,6 +396,23 @@ static int pon_line_debug_show(struct seq_file *m, void *unused)
+@@ -371,6 +412,39 @@ static int pon_line_debug_show(struct seq_file *m, void *unused)
  	           xpon->pcs_profile_valid ?
  	                   airoha_xpon_pcs_profile_name(xpon->pcs_profile) :
  	                   "none");
@@ -135,6 +199,22 @@ index 3e2bed8..2bf9179 100644
 +				   power.fec_cfg, power.fec_reg, power.pee_count,
 +				   power.pst_mode, power.pst_power_shortage,
 +				   power.ber_interval);
++	}
++
++	if (xpon->omci) {
++		struct airoha_xpon_omci_stats omci = {};
++
++		airoha_xpon_omci_get_stats(xpon->omci, &omci);
++		seq_printf(m,
++			   "omcc_gem: %u\n"
++			   "omci_ready: %d\n"
++			   "omci_running: %d\n"
++			   "omci_rx: %u\n"
++			   "omci_tx: %u\n"
++			   "omci_dropped: %u\n",
++			   omci.omcc_id, omci.ready, omci.running,
++			   omci.rx_packets, omci.tx_packets,
++			   omci.rx_dropped + omci.tx_dropped);
 +	}
  	mutex_unlock(&xpon->state_lock);
  	return 0;
@@ -1305,10 +1385,10 @@ index 0000000..700b440
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..3330bab
+index 0000000..57aa177
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,4262 @@
+@@ -0,0 +1,4346 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1347,6 +1427,8 @@ index 0000000..3330bab
 +#include "airoha-xpon-private.h"
 +#include "airoha-xpon-proto.h"
 +#include "airoha-xpon-gpon.h"
++#include "airoha-xpon-omci.h"
++#include <linux/airoha-eth.h>
 +#include "airoha-xpon-gpon-regs.h"
 +
 +/* ------------------------------------------------------------------ */
@@ -1440,6 +1522,13 @@ index 0000000..3330bab
 + * 200ms 节流，避免上游轮询提速时把 PLOAMu FIFO 灌满。
 + */
 +#define AIROHA_GPON_SN_REPORT_MS		200
++/*
++ * OMCC（OMCI 通道）的 GEM Port ID 默认值。
++ * GPON 的 OMCC 走 GEM，GEM Port ID 与 ONU-ID 无对应关系（那是 XGS-PON 的
++ * 约定），因此必须单独记录。多数商用 OLT 用 GEM 1 作为 OMCC，现场不一致时
++ * 可通过 sysfs `omcc_gem` 覆盖。
++ */
++#define AIROHA_GPON_OMCC_GEM_DEFAULT		1
 +
 +/* ------------------------------------------------------------------ */
 +/* 中断位定义（寄存器 0x0008 状态 / 0x000c 使能）                       */
@@ -1657,6 +1746,7 @@ index 0000000..3330bab
 +	u32			ber_interval;	/* 0x0e BER 监测间隔 */
 +	u32			fec_mode;	/* FEC 配置值，见 AIROHA_GPON_FEC_* */
 +	unsigned long		sn_last_sent;	/* 上次上报 Serial_Number 的 jiffies */
++	u16			omcc_gem_id;	/* OMCI 通道的 GEM Port ID */
 +	/*
 +	 * 是否曾经进入过 O5。用于区分"首次上线"与"掉线重连"：
 +	 * 首次上线由 OMCI 建立 GEM/Alloc-ID，不需要恢复；
@@ -2054,6 +2144,65 @@ index 0000000..3330bab
 +	return airoha_xpon_gpon_send_ploamu(xpon, up, 1);
 +}
 +EXPORT_SYMBOL_GPL(airoha_xpon_gpon_send_serial_number);
++
++/**
++ * gpon_control_match - 判断收到的控制帧是否属于本 ONU 的 OMCC
++ * @xpon: XPON 设备
++ * @info: QDMA 描述符解出的元数据
++ *
++ * 两个条件同时成立才算 OMCC 帧：
++ *   1. 硬件把该帧标记为 OMCI 帧（QDMA msg0 bit30，原厂
++ *      gwan_process_rx_message 用同一位置判定并做下行 MIC 校验）
++ *   2. GEM Port ID 等于本机记录的 OMCC GEM
++ *
++ * 不能沿用 main.c 的 XGS-PON 默认判据（info->id == onu_id）：GPON 的
++ * OMCC GEM 由 OLT 分配，与 ONU-ID 没有对应关系。
++ */
++static bool gpon_control_match(struct airoha_xpon *xpon,
++			       const struct airoha_pon_ctrl_rx_info *info)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++
++	if (!priv || !xpon->omci || !info)
++		return false;
++
++	if (!info->no_mic)
++		return false;
++
++	return info->id == priv->omcc_gem_id;
++}
++
++/**
++ * airoha_xpon_gpon_set_omcc_gem - 设置 OMCI 通道的 GEM Port ID
++ * @xpon: XPON 设备
++ * @gem:  GEM Port ID（0–4095）
++ *
++ * 供 sysfs 现场调整；O5 状态下会同步刷新 omci link 的 READY/OMCC ID。
++ */
++int airoha_xpon_gpon_set_omcc_gem(struct airoha_xpon *xpon, u16 gem)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++
++	if (!priv || gem > 0xfff)
++		return -EINVAL;
++
++	priv->omcc_gem_id = gem;
++
++	if (xpon->omci && priv->state == AIROHA_GPON_O5_OPERATION)
++		airoha_xpon_omci_set_link(xpon->omci, true, gem, 0);
++
++	dev_info(xpon->dev, "OMCC GEM set to %u\n", gem);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_omcc_gem);
++
++u16 airoha_xpon_gpon_omcc_gem(struct airoha_xpon *xpon)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++
++	return priv ? priv->omcc_gem_id : 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_omcc_gem);
 +
 +/* ------------------------------------------------------------------ */
 +/* PLOAMd 接收                                                         */
@@ -2648,6 +2797,9 @@ index 0000000..3330bab
 +	 */
 +	memset(priv->ploamd_table, 0, sizeof(priv->ploamd_table));
 +
++	if (!priv->omcc_gem_id)
++		priv->omcc_gem_id = AIROHA_GPON_OMCC_GEM_DEFAULT;
++
 +	priv->ploamd_table[AIROHA_GPON_MSG_UPSTREAM_OVERHEAD] =
 +		gpon_msg_upstream_overhead;
 +	priv->ploamd_table[AIROHA_GPON_MSG_ASSIGN_ONU_ID] =
@@ -3226,6 +3378,9 @@ index 0000000..3330bab
 +	switch (new_state) {
 +	case AIROHA_GPON_O1_INITIAL:
 +		priv->to1_retry_cnt = 0;
++		/* 离开运行态：撤销 OMCC，避免陈旧 GEM 继续收包 */
++		if (xpon->omci)
++			airoha_xpon_omci_set_link(xpon->omci, false, 0, 0);
 +		break;
 +
 +	case AIROHA_GPON_O2_STANDBY:
@@ -3248,6 +3403,13 @@ index 0000000..3330bab
 +				airoha_xpon_gpon_get_hw_param(xpon, 0x801e);
 +		airoha_xpon_gpon_write_state(xpon, new_state);
 +		priv->state = new_state;
++		/*
++		 * 进入 O5：OMCC 可用。ready 置位后 omci netdev 才允许收发，
++		 * OMCC ID 用于 omci_receive 的帧归属校验。
++		 */
++		if (xpon->omci)
++			airoha_xpon_omci_set_link(xpon->omci, true,
++						  priv->omcc_gem_id, 0);
 +		/* TO1：jiffies + to1_ms * 1000 / 8 */
 +		mod_timer(&priv->to1_timer,
 +			  jiffies + AIROHA_GPON_MS_TO_JIFFIES(priv->to1_ms));
@@ -5504,6 +5666,7 @@ index 0000000..3330bab
 +
 +	seq_printf(m, "GPON state: O%u\n", priv->state);
 +	seq_printf(m, "ONU-ID: %u\n", xpon->gpon_onu_id);
++	seq_printf(m, "OMCC GEM: %u\n", priv->omcc_gem_id);
 +	seq_printf(m, "EqD: last=0x%x pending=0x%x retry=%u\n",
 +		   priv->last_eqd, priv->eqd_pending, priv->ranging_retry);
 +	seq_printf(m, "LOS: %d  link_up: %d\n",
@@ -5540,6 +5703,7 @@ index 0000000..3330bab
 +	 * GPON 用 OMCI（ITU-T G.988），这三处由上游 omci 对象处理即可。
 +	 */
 +	.control_rx	= NULL,		/* OMCI 由上游 omci 对象处理 */
++	.control_match	= gpon_control_match,
 +	.control_match	= NULL,
 +	.control_wake_tx = NULL,
 +
@@ -5573,10 +5737,10 @@ index 0000000..3330bab
 + */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.h b/airoha-xpon/src/airoha-xpon-gpon.h
 new file mode 100644
-index 0000000..6c2937d
+index 0000000..af91721
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.h
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,129 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Airoha AN7581 GPON 线路层 —— 对外接口
@@ -5643,6 +5807,8 @@ index 0000000..6c2937d
 +
 +/* ---- GEM / T-CONT ---- */
 +int  airoha_xpon_gpon_send_serial_number(struct airoha_xpon *xpon);
++int  airoha_xpon_gpon_set_omcc_gem(struct airoha_xpon *xpon, u16 gem);
++u16  airoha_xpon_gpon_omcc_gem(struct airoha_xpon *xpon);
 +int  airoha_xpon_gpon_set_fec_mode(struct airoha_xpon *xpon, u32 mode);
 +
 +/* FEC / 省电诊断信息（PLOAM 0x0c/0x0d/0x0e 与 FEC 配置） */
@@ -6083,10 +6249,10 @@ index 8359949..cca1bf2 100644
  	{
  		.mode = AIROHA_XPON_MODE_XGPON,
 diff --git a/airoha-xpon/src/airoha-xpon-netlink.h b/airoha-xpon/src/airoha-xpon-netlink.h
-index 85d166d..19a8548 100644
+index 85d166d..21f0698 100644
 --- a/airoha-xpon/src/airoha-xpon-netlink.h
 +++ b/airoha-xpon/src/airoha-xpon-netlink.h
-@@ -51,6 +51,13 @@ enum airoha_xpon_line_attr {
+@@ -51,6 +51,20 @@ enum airoha_xpon_line_attr {
  	XPON_LINE_PCS_SYNC,
  	XPON_LINE_PCS_PROFILE_VALID,
  	XPON_LINE_PCS_PROFILE,
@@ -6097,9 +6263,73 @@ index 85d166d..19a8548 100644
 +	XPON_LINE_PST_MODE,
 +	XPON_LINE_PST_POWER_SHORTAGE,
 +	XPON_LINE_BER_INTERVAL,
++	/* OMCI 通道（同样追加在末尾） */
++	XPON_LINE_OMCC_GEM,
++	XPON_LINE_OMCI_READY,
++	XPON_LINE_OMCI_RUNNING,
++	XPON_LINE_OMCI_RX,
++	XPON_LINE_OMCI_TX,
++	XPON_LINE_OMCI_DROPPED,
  };
  
  enum airoha_xpon_frontend_attr {
+diff --git a/airoha-xpon/src/airoha-xpon-omci.c b/airoha-xpon/src/airoha-xpon-omci.c
+index 38ef05a..b764735 100644
+--- a/airoha-xpon/src/airoha-xpon-omci.c
++++ b/airoha-xpon/src/airoha-xpon-omci.c
+@@ -241,6 +241,29 @@ void airoha_xpon_omci_receive(struct airoha_xpon_omci *omci,
+ 	netif_receive_skb(skb);
+ }
+ 
++void airoha_xpon_omci_get_stats(struct airoha_xpon_omci *omci,
++				struct airoha_xpon_omci_stats *out)
++{
++	u32 context;
++
++	if (!omci || !out)
++		return;
++
++	memset(out, 0, sizeof(*out));
++	context = READ_ONCE(omci->tx_context);
++	out->ready = !!(context & AIROHA_OMCI_CTX_READY);
++	out->omcc_id = FIELD_GET(AIROHA_OMCI_CTX_OMCC_MASK, context);
++
++	if (omci->netdev) {
++		out->running = netif_running(omci->netdev);
++		out->rx_packets = omci->netdev->stats.rx_packets;
++		out->tx_packets = omci->netdev->stats.tx_packets;
++		out->rx_dropped = omci->netdev->stats.rx_dropped;
++		out->tx_dropped = omci->netdev->stats.tx_dropped;
++	}
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_omci_get_stats);
++
+ void airoha_xpon_omci_wake_tx(struct airoha_xpon_omci *omci)
+ {
+ 	if (!omci || !netif_running(omci->netdev) ||
+diff --git a/airoha-xpon/src/airoha-xpon-omci.h b/airoha-xpon/src/airoha-xpon-omci.h
+index bfa0d82..02e05de 100644
+--- a/airoha-xpon/src/airoha-xpon-omci.h
++++ b/airoha-xpon/src/airoha-xpon-omci.h
+@@ -27,4 +27,18 @@ void airoha_xpon_omci_receive(struct airoha_xpon_omci *omci,
+                               const struct airoha_pon_ctrl_rx_info *info);
+ void airoha_xpon_omci_wake_tx(struct airoha_xpon_omci *omci);
+ 
++/* 诊断用快照：供 netlink / debugfs 汇报 OMCI 通道状态 */
++struct airoha_xpon_omci_stats {
++	bool ready;		/* O5 且 OMCC 已激活 */
++	bool running;		/* omci netdev 是否 up */
++	u16  omcc_id;		/* 当前 OMCC GEM Port ID */
++	u32  rx_packets;
++	u32  tx_packets;
++	u32  rx_dropped;
++	u32  tx_dropped;
++};
++
++void airoha_xpon_omci_get_stats(struct airoha_xpon_omci *omci,
++				struct airoha_xpon_omci_stats *out);
++
+ #endif
 diff --git a/airoha-xpon/src/airoha-xpon-private.h b/airoha-xpon/src/airoha-xpon-private.h
 index ed050a9..aef712e 100644
 --- a/airoha-xpon/src/airoha-xpon-private.h

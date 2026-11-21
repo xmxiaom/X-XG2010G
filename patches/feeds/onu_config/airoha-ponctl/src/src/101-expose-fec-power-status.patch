@@ -1,6 +1,6 @@
 --- a/airoha-ponctl/src/src/netlink.rs
 +++ b/airoha-ponctl/src/src/netlink.rs
-@@ -362,6 +362,12 @@
+@@ -362,6 +362,18 @@
      ("pcs_sync", StatusKind::Bool),
      ("pcs_profile_valid", StatusKind::Bool),
      ("pcs_profile", StatusKind::String),
@@ -10,6 +10,12 @@
 +    ("pst_mode", StatusKind::U32),
 +    ("pst_power_shortage", StatusKind::Bool),
 +    ("ber_interval", StatusKind::U32),
++    ("omcc_gem", StatusKind::U32),
++    ("omci_ready", StatusKind::Bool),
++    ("omci_running", StatusKind::Bool),
++    ("omci_rx", StatusKind::U32),
++    ("omci_tx", StatusKind::U32),
++    ("omci_dropped", StatusKind::U32),
  ];
  
  const FRONTEND_FIELDS: &[(&str, StatusKind)] = &[
