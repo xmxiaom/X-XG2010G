@@ -1158,10 +1158,10 @@ index 0000000..700b440
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..679abd4
+index 0000000..21f72e9
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,3954 @@
+@@ -0,0 +1,3963 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1228,7 +1228,7 @@ index 0000000..679abd4
 +/* 状态寄存器合理上限：真实 FIFO 深度远小于此值，超过即视为寄存器异常 */
 +#define AIROHA_GPON_PLOAMD_SANE_MAX	0x20
 +/* 单次调用最多处理的帧数：防止状态位卡在高位导致死循环 */
-+#define AIROHA_GPON_PLOAMD_BURST	8
++#define AIROHA_GPON_PLOAMD_BURST	32	/* 突发吞吐：单次最多处理 32 条，仍保留上限防 FIFO 卡死拖死 link_work */
 +
 +/* PLOAM 报文固定 12 字节 = 3 个 32-bit 字 */
 +#define AIROHA_GPON_PLOAM_WORDS		3
@@ -1800,7 +1800,7 @@ index 0000000..679abd4
 +int airoha_xpon_gpon_send_ploamu(struct airoha_xpon *xpon, const u8 *msg,
 +				 u32 count)
 +{
-+	const u32 *words = (const u32 *)msg;
++	const u8 *p;
 +	u32 i, j;
 +
 +	if (!xpon->gpon_base)
@@ -1811,11 +1811,17 @@ index 0000000..679abd4
 +		return 0;
 +
 +	for (i = 0; i < count; i++) {
++		p = msg + i * AIROHA_GPON_PLOAM_BYTES;
 +		for (j = 0; j < AIROHA_GPON_PLOAM_WORDS; j++) {
-+			u32 w = words[i * AIROHA_GPON_PLOAM_WORDS + j];
++			/* 逐字节组装成大端字直接写入，等价于旧版
++			 * swab32(le32(p))——栈上 u8 数组做 u32* 强转
++			 * 在 arm64 是未对齐访问 UB */
++			u32 w = ((u32)p[j * 4 + 0] << 24) |
++				((u32)p[j * 4 + 1] << 16) |
++				((u32)p[j * 4 + 2] << 8) |
++				(u32)p[j * 4 + 3];
 +
-+			gpon_wr(xpon, AIROHA_GPON_PLOAMU_FIFO_DATA,
-+				swab32(w));
++			gpon_wr(xpon, AIROHA_GPON_PLOAMU_FIFO_DATA, w);
 +		}
 +	}
 +
@@ -1959,10 +1965,13 @@ index 0000000..679abd4
 +
 +	airoha_xpon_gpon_set_state(xpon, AIROHA_GPON_O5_OPERATION);
 +
-+	/* 0x0004 的低字节是 ONU-ID */
++	/* G.984.3 Assign_ONU_ID：byte0 是广播标记（0xff），分配的
++	 * ONU-ID 在载荷 byte2。寄存器 0x0004 低字节与软件侧同步更新，
++	 * 供上行 PLOAM byte0 的 ONU-ID 字段使用 */
 +	v = gpon_rd(xpon, AIROHA_GPON_ONU_GLOBAL_CONFIGURATION_REGISTER);
-+	v = (v & ~0xff) | (msg[0] & 0xff);
++	v = (v & ~0xff) | (msg[2] & 0xff);
 +	gpon_wr(xpon, AIROHA_GPON_ONU_GLOBAL_CONFIGURATION_REGISTER, v);
++	xpon->gpon_onu_id = msg[2] & 0x7f;
 +
 +	/* 原厂此处还调 gpon_init_qdma_tx_buff()，由 QoS 层实现 */
 +	return airoha_xpon_gpon_cmd(xpon, 0, AIROHA_GPON_CMD_TX_BUFF_INIT);
