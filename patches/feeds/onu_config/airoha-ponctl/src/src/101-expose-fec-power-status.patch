@@ -1,0 +1,15 @@
+--- a/airoha-ponctl/src/src/netlink.rs
++++ b/airoha-ponctl/src/src/netlink.rs
+@@ -362,6 +362,12 @@
+     ("pcs_sync", StatusKind::Bool),
+     ("pcs_profile_valid", StatusKind::Bool),
+     ("pcs_profile", StatusKind::String),
++    ("fec_cfg", StatusKind::U32),
++    ("fec_mode", StatusKind::U32),
++    ("pee_count", StatusKind::U32),
++    ("pst_mode", StatusKind::U32),
++    ("pst_power_shortage", StatusKind::Bool),
++    ("ber_interval", StatusKind::U32),
+ ];
+ 
+ const FRONTEND_FIELDS: &[(&str, StatusKind)] = &[

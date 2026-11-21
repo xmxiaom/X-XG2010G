@@ -1,0 +1,65 @@
+--- a/luci-app-pon-status/htdocs/luci-static/resources/view/status/include/29a_pon.js
++++ b/luci-app-pon-status/htdocs/luci-static/resources/view/status/include/29a_pon.js
+@@ -622,6 +622,53 @@
+ }
+ 
+ /*
++ * GPON link enhancement: FEC mode and power-saving state exposed by the
++ * driver (FEC register + PLOAM 0x0c/0x0d/0x0e). Returns null for EPON or
++ * for drivers that do not publish these fields, so the card disappears
++ * on other line modes instead of showing placeholders.
++ */
++function fecPowerPanel(line) {
++	var FEC_LABEL = { 0: '仅上行', 1: '双向', 2: '关闭', 3: '仅下行' };
++	var has = line != null && Object.prototype.hasOwnProperty.call(line, 'fec_cfg');
++	var fec, ps;
++
++	if (!has)
++		return null;
++
++	fec = FEC_LABEL[line.fec_cfg] || ('未知 ' + line.fec_cfg);
++	ps = (Number(line.pee_count) || 0) + ' 次';
++	if (line.pst_mode != null)
++		ps += ' · M' + line.pst_mode;
++	if (line.pst_power_shortage)
++		ps += ' · 掉电';
++
++	function row(label, value) {
++		return E('div', { 'style': 'display: flex; align-items: baseline; gap: 6px; flex-wrap: nowrap; white-space: nowrap' }, [
++			E('span', { 'style': 'width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: 0.45; flex: 0 0 auto; align-self: center' }),
++			E('span', { 'style': 'font-size: 12px; opacity: 0.6' }, label),
++			E('strong', { 'style': 'font-size: 15px; font-weight: 600' }, value)
++		]);
++	}
++
++	return E('div', { 'class': 'ifacebox', 'style': 'flex: 0 0 auto; margin: 0' }, [
++		E('div', {
++			'class': 'ifacebox-head',
++			'style': 'display: flex; align-items: center; gap: 5px; padding: 3px 10px; font-size: 12px; font-weight: 600'
++		}, [
++			E('span', { 'style': 'width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: 0.45; flex: 0 0 auto' }),
++			'链路增强'
++		]),
++		E('div', {
++			'class': 'ifacebox-body',
++			'style': 'display: flex; flex-direction: column; gap: 6px; padding: 6px 10px'
++		}, [
++			row('FEC', fec),
++			row('省电', ps)
++		])
++	]);
++}
++
++/*
+  * The card carries no head strip: the device name and the colored title
+  * bar were dropped, so the body row starts directly with the optics
+  * figure. The ifacebox wrapper still provides the panel background and
+@@ -642,7 +689,7 @@
+ 				tempStatePanel(item.frontend, onu),
+ 				voltAmpPanel(item.frontend),
+ 				ratePanel(item.rate)
+-			])
++			].concat(fecPowerPanel(item.line) ? [fecPowerPanel(item.line)] : []))
+ 		])
+ 	]);
+ }

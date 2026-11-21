@@ -1238,10 +1238,10 @@ index 0000000..700b440
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..3bd1c47
+index 0000000..e5cf0f4
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,3975 @@
+@@ -0,0 +1,4170 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1327,6 +1327,27 @@ index 0000000..3bd1c47
 +#define AIROHA_GPON_MSG_PST			0x0d
 +#define AIROHA_GPON_MSG_BER_INTERVAL		0x0e
 +#define AIROHA_GPON_MSG_DYING_GASP		0x0f
++
++/*
++ * FEC 模式（原厂 gponDevSetDsFecMode @0x16794 / gponDevSetPhyDsFecMde @0x16718）
++ *
++ * 寄存器在 xgpon 窗口：原厂 g_xgpon_mac_reg_BASE(0x1fb60000) + 0x5868
++ * = 0x1fb65868 = 本驱动 xgpon_base(0x1fb65000) + 0x868。
++ *   bit0 = 下行 FEC 使能
++ *   bit1 = 上行 FEC 使能
++ *
++ * 原厂把"配置值"经 gponDevSetPhyDsFecMde 映射成寄存器位：
++ *   0 → 0b10（仅上行）  1 → 0b11（双向）
++ *   2 → 0b00（关闭）    3 → 0b01（仅下行）
++ * gpon_dev_init 里 GPON 类型取 0（仅上行 FEC），其余类型取 3。
++ */
++#define AIROHA_XGPON_FEC_MODE_REG	0x0868
++#define AIROHA_XGPON_FEC_DS		BIT(0)
++#define AIROHA_XGPON_FEC_US		BIT(1)
++#define AIROHA_GPON_FEC_MODE_DEFAULT	0	/* 原厂 GPON：仅上行 FEC */
++#define AIROHA_GPON_FEC_TYPE_DISABLED	2
++#define AIROHA_GPON_FEC_TYPE_BOTH	1
++#define AIROHA_GPON_FEC_TYPE_DS_ONLY	3
 +
 +/* 上行 PLOAM 消息 ID（G.984.3 Table 79） */
 +#define AIROHA_GPON_PLOAMU_MSG_PASSWORD		0x02
@@ -1552,6 +1573,15 @@ index 0000000..3bd1c47
 +	u32			emergence_head;
 +	u32			emergence_count;
 +	s32			hw_param_cache;		/* +0x24c，初值 -1 */
++	/*
++	 * 省电与误码监测（PLOAM 0x0c / 0x0d / 0x0e）
++	 *   原厂 @0xa4c0 起为 0x0a/0x0d 处理器，位域还原见各 handler 注释。
++	 */
++	u32			pee_count;	/* 0x0c Power_Emergency 次数 */
++	u32			pst_mode;	/* 0x0d 省电模式（原厂 priv+992） */
++	bool			pst_power_shortage;	/* 0x0d 掉电标志（原厂 priv+996） */
++	u32			ber_interval;	/* 0x0e BER 监测间隔 */
++	u32			fec_mode;	/* FEC 配置值，见 AIROHA_GPON_FEC_* */
 +	/*
 +	 * 是否曾经进入过 O5。用于区分"首次上线"与"掉线重连"：
 +	 * 首次上线由 OMCI 建立 GEM/Alloc-ID，不需要恢复；
@@ -2228,6 +2258,120 @@ index 0000000..3bd1c47
 +	return ret;
 +}
 +
++/*
++ * Encrypted_Port-ID（0x0a）：OLT 下发需要 AES 加密的 GEM 端口。
++ *
++ * 原厂 @0xa4c0：ONU-ID 匹配 → 状态必须 O5 → 取 Alloc-ID → 查是否已存在，
++ * 未存在则挂起待建。G.984.3 语义与 Configure_Port-ID 同构，差别是该
++ * GEM 表项必须带加密位，所以直接复用 set_gem_info 的 encrypt 参数。
++ * 载荷偏移沿用本驱动 0x09 的约定（byte2 类型，byte3-4 GEM Port ID）。
++ */
++static int gpon_msg_encrypted_port_id(struct airoha_xpon *xpon, const u8 *msg)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++	u8 type = msg[2];
++	u16 gem = ((u16)msg[3] << 8) | msg[4];
++	int ret;
++
++	if (priv->state != AIROHA_GPON_O5_OPERATION) {
++		dev_dbg(xpon->dev, "encrypted port-id outside O5, ignored\n");
++		return 0;
++	}
++
++	if (type != 0x01) {
++		dev_dbg(xpon->dev, "encrypted port-id type %u ignored\n", type);
++		return 0;
++	}
++
++	ret = airoha_xpon_gpon_set_gem_info(xpon, gem, false, true);
++	if (ret)
++		dev_warn(xpon->dev, "encrypted gem %u config failed: %d\n",
++			 gem, ret);
++	else
++		dev_info(xpon->dev, "encrypted gem %u configured (downstream)\n",
++			 gem);
++
++	return ret;
++}
++
++/*
++ * PEE / Power_Emergency（0x0c）：OLT 通知 ONU 进入省电。
++ *
++ * 原厂分派表 0x0c 槽位为空（xpon_10g.ko 分派表只有 0x01/0x03/0x04/0x05/
++ * 0x06/0x08/0x09/0x0a/0x0d/0x0f/0x12…），因此这里按 G.984.3 做记录型
++ * 实现：只统计与打印，不改链路和业务状态，避免误入未验证的省电流程。
++ */
++static int gpon_msg_pee(struct airoha_xpon *xpon, const u8 *msg)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++
++	priv->pee_count++;
++	dev_info(xpon->dev, "PLOAM Power_Emergency received (count %u)\n",
++		 priv->pee_count);
++	return 0;
++}
++
++/*
++ * PST / Power_Shortage（0x0d）：OLT 下发省电参数。
++ *
++ * 原厂 @0xa8ec 的判定顺序：
++ *   1. ONU-ID 匹配，接受本机 / 0x3ff / 0x3fe
++ *   2. 状态必须 O5 或 O9
++ *   3. 载荷 byte7 == 0 视为无效
++ *   4. 取 byte6 bit[7:6] 存 priv+992、byte5 bit7 存 priv+996
++ *
++ * 原厂帧比本驱动多一个头字节，所以原厂 byte5/6/7 对应本驱动 msg[3]/[4]/[5]。
++ * 位域按原厂 ubfx 还原。
++ */
++static int gpon_msg_pst(struct airoha_xpon *xpon, const u8 *msg)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++	u8 target = msg[0];
++
++	/*
++	 * 本驱动帧布局：msg[0] = ONU-ID，msg[1] = 消息 ID。原厂的分派缓冲
++	 * 多一个头字节（byte0<<8|byte1 拼 16 位 ID），所以不能照搬它的
++	 * 0x3ff/0x3fe 判据；这里按 G.984.3 用单字节 ONU-ID + 0xff 广播。
++	 */
++	if (target != (xpon->gpon_onu_id & 0x7f) && target != 0xff) {
++		dev_dbg(xpon->dev, "PST for other ONU (%u), ignored\n", target);
++		return -EINVAL;
++	}
++
++	if (priv->state != AIROHA_GPON_O5_OPERATION) {
++		dev_dbg(xpon->dev, "PST outside O5, ignored\n");
++		return 0;
++	}
++
++	if (msg[5] == 0) {
++		dev_dbg(xpon->dev, "PST with empty payload, ignored\n");
++		return -EINVAL;
++	}
++
++	priv->pst_mode = (msg[4] >> 6) & 0x3;
++	priv->pst_power_shortage = !!(msg[3] & 0x80);
++
++	dev_info(xpon->dev, "PLOAM Power_Shortage: mode %u, shortage %u\n",
++		 priv->pst_mode, priv->pst_power_shortage);
++	return 0;
++}
++
++/*
++ * BER_Interval（0x0e）：OLT 下发误码率监测间隔。
++ *
++ * 原厂分派表 0x0e 槽位为空，这里按 G.984.3 记录间隔值（BE16，单位由
++ * OLT 决定），供后续 ber_check 使用；不改变当前 BER/SD/SF 检测行为。
++ */
++static int gpon_msg_ber_interval(struct airoha_xpon *xpon, const u8 *msg)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++	u32 interval = ((u32)msg[2] << 8) | msg[3];
++
++	priv->ber_interval = interval;
++	dev_info(xpon->dev, "PLOAM BER_Interval set to %u\n", interval);
++	return 0;
++}
++
 +/* ------------------------------------------------------------------ */
 +/* O5 精细测距校正                                                     */
 +/* 原厂：ploam_eqd_adjustment @0x014bd0（1052 字节）                    */
@@ -2406,6 +2550,11 @@ index 0000000..3bd1c47
 +		gpon_msg_request_key;
 +	priv->ploamd_table[AIROHA_GPON_MSG_CONFIGURE_PORT_ID] =
 +		gpon_msg_configure_port_id;
++	priv->ploamd_table[AIROHA_GPON_MSG_ENCRYPTED_PORT_ID] =
++		gpon_msg_encrypted_port_id;
++	priv->ploamd_table[AIROHA_GPON_MSG_PEE] = gpon_msg_pee;
++	priv->ploamd_table[AIROHA_GPON_MSG_PST] = gpon_msg_pst;
++	priv->ploamd_table[AIROHA_GPON_MSG_BER_INTERVAL] = gpon_msg_ber_interval;
 +	priv->ploamd_table[AIROHA_GPON_MSG_DYING_GASP] =
 +		gpon_msg_dying_gasp;
 +	/* msg_id 2 / 7 / 11 原厂未注册，保持 NULL */
@@ -2831,6 +2980,48 @@ index 0000000..3bd1c47
 + * xgpon_program_identity 的位置对应。未配置 SN 时直接返回，
 + * 保留 bootloader / NVMEM 预置的序列号。
 + */
++/**
++ * airoha_xpon_gpon_set_fec_mode - 配置上行/下行 FEC 使能
++ * @xpon: XPON 设备
++ * @mode: 0=仅上行 1=双向 2=关闭 3=仅下行（与原厂 gponDevSetPhyDsFecMde 一致）
++ *
++ * 写 xgpon 窗口 0x868 的 bit[1:0]。原厂在 gpon_dev_init 里按 PON 类型
++ * 调本函数，GPON 使用"仅上行 FEC"。
++ */
++int airoha_xpon_gpon_set_fec_mode(struct airoha_xpon *xpon, u32 mode)
++{
++	u32 bits;
++
++	if (!xpon->xgpon_base)
++		return -ENODEV;
++
++	switch (mode) {
++	case 0:				/* 仅上行 */
++		bits = AIROHA_XGPON_FEC_US;
++		break;
++	case AIROHA_GPON_FEC_TYPE_BOTH:	/* 双向 */
++		bits = AIROHA_XGPON_FEC_US | AIROHA_XGPON_FEC_DS;
++		break;
++	case AIROHA_GPON_FEC_TYPE_DISABLED:	/* 关闭 */
++		bits = 0;
++		break;
++	case AIROHA_GPON_FEC_TYPE_DS_ONLY:	/* 仅下行 */
++		bits = AIROHA_XGPON_FEC_DS;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	bits |= airoha_xgpon_read(xpon, AIROHA_XGPON_FEC_MODE_REG) & ~0x3;
++	airoha_xgpon_write(xpon, AIROHA_XGPON_FEC_MODE_REG, bits);
++
++	dev_info(xpon->dev, "FEC mode %u (reg 0x%03x = 0x%08x)\n",
++		 mode, AIROHA_XGPON_FEC_MODE_REG,
++		 airoha_xgpon_read(xpon, AIROHA_XGPON_FEC_MODE_REG));
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_fec_mode);
++
 +int airoha_xpon_gpon_program_identity(struct airoha_xpon *xpon)
 +{
 +	const struct airoha_xpon_identity *identity =
@@ -4813,6 +5004,10 @@ index 0000000..3bd1c47
 +	/* 6d. PLOAM 过滤（防异常 ONU 干扰） */
 +	airoha_xpon_gpon_set_ploam_filter(xpon, 0xff, 0xff);
 +
++	/* 6e. FEC 模式（原厂 gpon_dev_init：GPON 只开上行 FEC） */
++	if (airoha_xpon_gpon_set_fec_mode(xpon, priv->fec_mode) < 0)
++		dev_warn(xpon->dev, "FEC mode %u set failed\n", priv->fec_mode);
++
 +	/* 7-10. 时钟与延迟 */
 +	gpon_wr(xpon, AIROHA_GPON_TOD_CLOCK_PERIOD, 0xa);
 +	gpon_wr(xpon, AIROHA_GPON_INTERNAL_DELAY,
@@ -5219,10 +5414,10 @@ index 0000000..3bd1c47
 + */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.h b/airoha-xpon/src/airoha-xpon-gpon.h
 new file mode 100644
-index 0000000..ff5e1e6
+index 0000000..1a04aa3
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.h
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,113 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Airoha AN7581 GPON 线路层 —— 对外接口
@@ -5288,6 +5483,7 @@ index 0000000..ff5e1e6
 +bool airoha_xpon_gpon_backoff_ok(struct airoha_xpon *xpon);
 +
 +/* ---- GEM / T-CONT ---- */
++int  airoha_xpon_gpon_set_fec_mode(struct airoha_xpon *xpon, u32 mode);
 +int  airoha_xpon_gpon_set_gem_info(struct airoha_xpon *xpon, u16 gem_port,
 +				   bool upstream, bool encrypt);
 +int  airoha_xpon_gpon_set_alloc_id(struct airoha_xpon *xpon, u8 tcont,
