@@ -73,7 +73,7 @@ index 9ef7e85..5e3f484 100644
  	&dev_attr_data_path.attr,
  	&dev_attr_service_ready.attr,
 diff --git a/airoha-xpon/src/airoha-xpon-diagnostics.c b/airoha-xpon/src/airoha-xpon-diagnostics.c
-index 3e2bed8..2b62549 100644
+index 3e2bed8..2bf9179 100644
 --- a/airoha-xpon/src/airoha-xpon-diagnostics.c
 +++ b/airoha-xpon/src/airoha-xpon-diagnostics.c
 @@ -13,6 +13,7 @@
@@ -84,13 +84,20 @@ index 3e2bed8..2b62549 100644
  
  static const char *airoha_xpon_lifecycle_name(enum airoha_xpon_lifecycle state)
  {
-@@ -180,6 +181,23 @@ int airoha_xpon_put_status(struct sk_buff *reply, struct airoha_xpon *xpon)
+@@ -180,6 +181,30 @@ int airoha_xpon_put_status(struct sk_buff *reply, struct airoha_xpon *xpon)
  	    nla_put_string(reply, XPON_LINE_PCS_PROFILE,
  	                   airoha_xpon_pcs_profile_name(xpon->pcs_profile)))
  		goto out;
 +
-+	/* GPON 专属：FEC 模式与省电（0x0c/0x0d/0x0e）状态 */
-+	if (!epon) {
++	/*
++	 * GPON 专属：FEC 模式与省电（0x0c/0x0d/0x0e）状态。
++	 * 必须明确限定为 GPON：gpon_priv 只在 GPON 初始化时赋值、切换模式
++	 * 不清空，XGPON 下若沿用 !epon 判断会读到上一轮 GPON 的陈旧值。
++	 */
++	if (!epon &&
++	    (xpon->active_mode_valid ? xpon->active_mode :
++				       xpon->configured_mode) ==
++		    AIROHA_XPON_MODE_GPON) {
 +		struct airoha_gpon_power_info power = {};
 +
 +		if (!airoha_xpon_gpon_get_power_info(xpon, &power)) {
@@ -108,7 +115,7 @@ index 3e2bed8..2b62549 100644
  	nla_nest_end(reply, group);
  
  	group = nla_nest_start(reply, AIROHA_XPON_ATTR_FRONTEND);
-@@ -371,6 +389,23 @@ static int pon_line_debug_show(struct seq_file *m, void *unused)
+@@ -371,6 +396,23 @@ static int pon_line_debug_show(struct seq_file *m, void *unused)
  	           xpon->pcs_profile_valid ?
  	                   airoha_xpon_pcs_profile_name(xpon->pcs_profile) :
  	                   "none");
