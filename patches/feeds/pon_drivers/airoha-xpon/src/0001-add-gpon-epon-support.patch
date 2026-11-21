@@ -1305,10 +1305,10 @@ index 0000000..700b440
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..bc4da91
+index 0000000..3330bab
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,4201 @@
+@@ -0,0 +1,4262 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1417,6 +1417,7 @@ index 0000000..bc4da91
 +#define AIROHA_GPON_FEC_TYPE_DS_ONLY	3
 +
 +/* 上行 PLOAM 消息 ID（G.984.3 Table 79） */
++#define AIROHA_GPON_PLOAMU_MSG_SERIAL_NUMBER	0x01
 +#define AIROHA_GPON_PLOAMU_MSG_PASSWORD		0x02
 +#define AIROHA_GPON_PLOAMU_MSG_KEY_REPORT	0x05
 +#define AIROHA_GPON_PLOAMU_MSG_KEY_SWITCH_TIME	0x09
@@ -1433,6 +1434,12 @@ index 0000000..bc4da91
 +
 +/* 上行 PLOAM 的 Send 位 */
 +#define AIROHA_GPON_PLOAMU_SEND			BIT(7)
++/*
++ * O2/O3 期间 Serial_Number_ONU 的重发间隔。G.984.3 要求 ONU 在收到
++ * Assign_ONU_ID 之前周期性上报 SN，advance() 本身 250ms 一轮，这里再用
++ * 200ms 节流，避免上游轮询提速时把 PLOAMu FIFO 灌满。
++ */
++#define AIROHA_GPON_SN_REPORT_MS		200
 +
 +/* ------------------------------------------------------------------ */
 +/* 中断位定义（寄存器 0x0008 状态 / 0x000c 使能）                       */
@@ -1649,6 +1656,7 @@ index 0000000..bc4da91
 +	bool			pst_power_shortage;	/* 0x0d 掉电标志（原厂 priv+996） */
 +	u32			ber_interval;	/* 0x0e BER 监测间隔 */
 +	u32			fec_mode;	/* FEC 配置值，见 AIROHA_GPON_FEC_* */
++	unsigned long		sn_last_sent;	/* 上次上报 Serial_Number 的 jiffies */
 +	/*
 +	 * 是否曾经进入过 O5。用于区分"首次上线"与"掉线重连"：
 +	 * 首次上线由 OMCI 建立 GEM/Alloc-ID，不需要恢复；
@@ -2009,6 +2017,43 @@ index 0000000..bc4da91
 +	return 0;
 +}
 +EXPORT_SYMBOL_GPL(airoha_xpon_gpon_send_ploamu);
++
++/**
++ * airoha_xpon_gpon_send_serial_number - 上报 Serial_Number_ONU（PLOAMu 0x01）
++ * @xpon: XPON 设备
++ *
++ * 注册流程第一环：ONU 在 O2/O3 周期上报 8 字节序列号（4 字节厂商 + 4 字节
++ * VSSN），OLT 据此匹配并下发 Assign_ONU_ID。此前驱动只写 SN 寄存器、从不
++ * 发这条消息，链路会一直停在 O2。
++ *
++ * 帧格式按 G.984.3 §9.2.1，与原厂 xpon_10g.ko
++ * `ploam_send_serial_number_msg @0x775c` 一致：
++ *   byte0 = 发送标志 | 0xff   （未分配 ONU-ID 时用广播地址）
++ *   byte1 = 0x01              （Serial_Number_ONU）
++ *   byte2..9 = SN 8 字节
++ */
++int airoha_xpon_gpon_send_serial_number(struct airoha_xpon *xpon)
++{
++	const struct airoha_xpon_identity *identity;
++	struct airoha_gpon_priv *priv;
++	u8 up[AIROHA_GPON_PLOAM_BYTES];
++
++	if (!xpon || !xpon->gpon_base)
++		return -ENODEV;
++
++	priv = gpon_priv(xpon);
++	identity = &xpon->identity.active_identity;
++	if (!priv || !identity->serial_configured)
++		return -EINVAL;
++
++	memset(up, 0, sizeof(up));
++	up[0] = AIROHA_GPON_PLOAMU_SEND | 0xff;
++	up[1] = AIROHA_GPON_PLOAMU_MSG_SERIAL_NUMBER;
++	memcpy(&up[2], identity->serial_number, 8);
++
++	return airoha_xpon_gpon_send_ploamu(xpon, up, 1);
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_send_serial_number);
 +
 +/* ------------------------------------------------------------------ */
 +/* PLOAMd 接收                                                         */
@@ -5415,6 +5460,22 @@ index 0000000..bc4da91
 +	if (xpon->gpon_ploam_ready)
 +		airoha_xpon_gpon_recv_ploamd(xpon);
 +
++	/*
++	 * O2/O3 期间周期上报 Serial_Number：OLT 匹配到 SN 后才下发
++	 * Assign_ONU_ID。进入 O5 后停止（ONU-ID 已分配，不再需要）。
++	 */
++	if (priv->state == AIROHA_GPON_O2_STANDBY ||
++	    priv->state == AIROHA_GPON_O3_SERIAL) {
++		unsigned long now = jiffies;
++
++		if (!priv->sn_last_sent ||
++		    time_after(now, priv->sn_last_sent +
++				    msecs_to_jiffies(AIROHA_GPON_SN_REPORT_MS))) {
++			if (!airoha_xpon_gpon_send_serial_number(xpon))
++				priv->sn_last_sent = now;
++		}
++	}
++
 +	/* O6 POPUP 超时检查 */
 +	if (priv->state == AIROHA_GPON_O6_POPUP &&
 +	    time_after(jiffies, (unsigned long)priv->to2_expire)) {
@@ -5512,10 +5573,10 @@ index 0000000..bc4da91
 + */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.h b/airoha-xpon/src/airoha-xpon-gpon.h
 new file mode 100644
-index 0000000..993c144
+index 0000000..6c2937d
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.h
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,127 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Airoha AN7581 GPON 线路层 —— 对外接口
@@ -5581,6 +5642,7 @@ index 0000000..993c144
 +bool airoha_xpon_gpon_backoff_ok(struct airoha_xpon *xpon);
 +
 +/* ---- GEM / T-CONT ---- */
++int  airoha_xpon_gpon_send_serial_number(struct airoha_xpon *xpon);
 +int  airoha_xpon_gpon_set_fec_mode(struct airoha_xpon *xpon, u32 mode);
 +
 +/* FEC / 省电诊断信息（PLOAM 0x0c/0x0d/0x0e 与 FEC 配置） */
