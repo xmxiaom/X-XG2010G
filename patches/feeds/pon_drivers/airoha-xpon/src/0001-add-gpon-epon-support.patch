@@ -1158,10 +1158,10 @@ index 0000000..700b440
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..ab3b78e
+index 0000000..679abd4
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,3807 @@
+@@ -0,0 +1,3954 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -1191,6 +1191,7 @@ index 0000000..ab3b78e
 +#include <linux/regmap.h>
 +#include <linux/ktime.h>
 +#include <linux/netdevice.h>
++#include <linux/random.h>
 +#include <linux/seq_file.h>
 +#include <linux/string.h>
 +#include <linux/swab.h>
@@ -1246,6 +1247,14 @@ index 0000000..ab3b78e
 +#define AIROHA_GPON_MSG_PST			0x0d
 +#define AIROHA_GPON_MSG_BER_INTERVAL		0x0e
 +#define AIROHA_GPON_MSG_DYING_GASP		0x0f
++
++/* 上行 PLOAM 消息 ID（G.984.3 Table 79） */
++#define AIROHA_GPON_PLOAMU_MSG_PASSWORD		0x02
++#define AIROHA_GPON_PLOAMU_MSG_KEY_REPORT	0x05
++#define AIROHA_GPON_PLOAMU_MSG_KEY_SWITCH_TIME	0x09
++
++/* 收到 Request_Key 后，密钥切换余量（超帧数） */
++#define AIROHA_GPON_KEY_SWITCH_MARGIN		8u
 +
 +/* 分派表下标上限（原厂 ploam_parser_down_message 里是 0x18） */
 +#define AIROHA_GPON_PLOAM_MAX_ID		0x18
@@ -1997,6 +2006,138 @@ index 0000000..ab3b78e
 +}
 +
 +/* ------------------------------------------------------------------ */
++/* Password / Request_Key / Configure_Port-ID                          */
++/* 原厂：Password @0x016778、Request_Key @0x016ce4、                    */
++/*       Configure_Port-ID @0x016f44                                   */
++/*                                                                     */
++/* 三个处理器的反汇编细节未还原，本节按 G.984.3 补全：                  */
++/*   0x05 → 上行 Password (0x02)，10 字节取自 priv->sn_passwd           */
++/*   0x08 → 生成新 AES-128 密钥写影子寄存器并定时切换，                 */
++/*          上行 Key_Report (0x05) ×2 + Key_Switching_Time (0x09)       */
++/*   0x09 → 解析 GEM Port ID，写入硬件 GEM 解密表                       */
++/* ------------------------------------------------------------------ */
++
++/**
++ * gpon_msg_password - 下行 0x05 Password：回上行 Password
++ *
++ * 原厂注释仅说明"回 Password"。OLT 下发该消息用于认证确认，ONU 将
++ * priv->sn_passwd（10 字符，不足补 0）原样回填；未配置时回全 0。
++ */
++static int gpon_msg_password(struct airoha_xpon *xpon, const u8 *msg)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++	u8 up[AIROHA_GPON_PLOAM_BYTES];
++
++	if (!priv)
++		return -ENODEV;
++
++	memset(up, 0, sizeof(up));
++	up[0] = AIROHA_GPON_PLOAMU_SEND | (xpon->gpon_onu_id & 0x7f);
++	up[1] = AIROHA_GPON_PLOAMU_MSG_PASSWORD;
++	if (priv->sn_passwd_set)
++		memcpy(&up[2], priv->sn_passwd, sizeof(priv->sn_passwd));
++
++	airoha_xpon_gpon_send_ploamu(xpon, up, 1);
++	dev_dbg(xpon->dev, "downstream password acknowledged (set=%d)\n",
++		priv->sn_passwd_set);
++
++	return 0;
++}
++
++/**
++ * gpon_msg_request_key - 下行 0x08 Request_Key：AES 密钥交换
++ *
++ * G.984.3 9.2.3：密钥由 ONU 产生。收到本消息后：
++ *   1. 生成新的 16 字节 AES-128 密钥，写入影子寄存器
++ *   2. 选定切换超帧号（当前 + AIROHA_GPON_KEY_SWITCH_MARGIN），
++ *      交给硬件定时切换，不打断业务
++ *   3. 上行 Key_Report (0x05) ×2：byte2 = 分片号（1/2），
++ *      byte3-10 = 8 字节密钥分片
++ *   4. 上行 Key_Switching_Time (0x09)：byte2 = key_id，
++ *      byte3-6 = 大端 32 位切换超帧号
++ */
++static int gpon_msg_request_key(struct airoha_xpon *xpon, const u8 *msg)
++{
++	struct airoha_gpon_priv *priv = gpon_priv(xpon);
++	u8 key[16];
++	u8 up[AIROHA_GPON_PLOAM_BYTES];
++	u32 now, switch_at;
++	u8 key_id;
++	int i;
++
++	if (!priv)
++		return -ENODEV;
++
++	/* 载荷 byte3 = 请求的密钥编号（0 视为 1） */
++	key_id = msg[3] ? msg[3] : 1;
++
++	get_random_bytes(key, sizeof(key));
++
++	if (airoha_xpon_gpon_set_shadow_key(xpon, key))
++		return -ENODEV;
++
++	airoha_xpon_gpon_get_superframe(xpon);
++	now = priv->superframe;
++	switch_at = now + AIROHA_GPON_KEY_SWITCH_MARGIN;
++	airoha_xpon_gpon_set_key_switch_time(xpon, switch_at);
++
++	/* Key_Report ×2 */
++	for (i = 0; i < 2; i++) {
++		memset(up, 0, sizeof(up));
++		up[0] = AIROHA_GPON_PLOAMU_SEND | (xpon->gpon_onu_id & 0x7f);
++		up[1] = AIROHA_GPON_PLOAMU_MSG_KEY_REPORT;
++		up[2] = i + 1;
++		memcpy(&up[3], key + i * 8, 8);
++		airoha_xpon_gpon_send_ploamu(xpon, up, 1);
++	}
++
++	/* Key_Switching_Time */
++	memset(up, 0, sizeof(up));
++	up[0] = AIROHA_GPON_PLOAMU_SEND | (xpon->gpon_onu_id & 0x7f);
++	up[1] = AIROHA_GPON_PLOAMU_MSG_KEY_SWITCH_TIME;
++	up[2] = key_id;
++	up[3] = (switch_at >> 24) & 0xff;
++	up[4] = (switch_at >> 16) & 0xff;
++	up[5] = (switch_at >> 8) & 0xff;
++	up[6] = switch_at & 0xff;
++	airoha_xpon_gpon_send_ploamu(xpon, up, 1);
++
++	dev_info(xpon->dev,
++		 "AES key rotation scheduled: key_id=%u switch_at=%u (now=%u)\n",
++		 key_id, switch_at, now);
++
++	return 0;
++}
++
++/**
++ * gpon_msg_configure_port_id - 下行 0x09 Configure_Port-ID：GEM 建立
++ *
++ * G.984.3 载荷：byte2 = 分配类型（0x01 = GEM Port），
++ * byte3-4 = GEM Port ID（大端 16 位）。
++ * 写入硬件 GEM 解密表（下行）；加密 GEM 由 0x0a Encrypted_Port-ID
++ * 另行携带（当前未实现）。上行侧由 OMCI / 本地配置建立。
++ */
++static int gpon_msg_configure_port_id(struct airoha_xpon *xpon, const u8 *msg)
++{
++	u8 type = msg[2];
++	u16 gem = ((u16)msg[3] << 8) | msg[4];
++	int ret;
++
++	if (type != 0x01) {
++		dev_dbg(xpon->dev, "port-id assignment type %u ignored\n", type);
++		return 0;
++	}
++
++	ret = airoha_xpon_gpon_set_gem_info(xpon, gem, false, false);
++	if (ret)
++		dev_warn(xpon->dev, "gem port %u config failed: %d\n", gem, ret);
++	else
++		dev_info(xpon->dev, "gem port %u configured (downstream)\n", gem);
++
++	return ret;
++}
++
++/* ------------------------------------------------------------------ */
 +/* O5 精细测距校正                                                     */
 +/* 原厂：ploam_eqd_adjustment @0x014bd0（1052 字节）                    */
 +/* ------------------------------------------------------------------ */
@@ -2165,6 +2306,12 @@ index 0000000..ab3b78e
 +		gpon_msg_ranging_time;
 +	priv->ploamd_table[AIROHA_GPON_MSG_DEACTIVATE_ONU_ID] =
 +		gpon_msg_deactivate;
++	priv->ploamd_table[AIROHA_GPON_MSG_PASSWORD] =
++		gpon_msg_password;
++	priv->ploamd_table[AIROHA_GPON_MSG_REQUEST_KEY] =
++		gpon_msg_request_key;
++	priv->ploamd_table[AIROHA_GPON_MSG_CONFIGURE_PORT_ID] =
++		gpon_msg_configure_port_id;
 +	priv->ploamd_table[AIROHA_GPON_MSG_DYING_GASP] =
 +		gpon_msg_dying_gasp;
 +	/* msg_id 2 / 7 / 11 原厂未注册，保持 NULL */
