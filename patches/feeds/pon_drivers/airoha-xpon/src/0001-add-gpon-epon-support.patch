@@ -72,6 +72,66 @@ index 9ef7e85..5e3f484 100644
  	&dev_attr_omci_msk.attr,
  	&dev_attr_data_path.attr,
  	&dev_attr_service_ready.attr,
+diff --git a/airoha-xpon/src/airoha-xpon-diagnostics.c b/airoha-xpon/src/airoha-xpon-diagnostics.c
+index 3e2bed8..2b62549 100644
+--- a/airoha-xpon/src/airoha-xpon-diagnostics.c
++++ b/airoha-xpon/src/airoha-xpon-diagnostics.c
+@@ -13,6 +13,7 @@
+ 
+ #include "airoha-xpon-private.h"
+ #include "airoha-xpon-epon.h"
++#include "airoha-xpon-gpon.h"
+ 
+ static const char *airoha_xpon_lifecycle_name(enum airoha_xpon_lifecycle state)
+ {
+@@ -180,6 +181,23 @@ int airoha_xpon_put_status(struct sk_buff *reply, struct airoha_xpon *xpon)
+ 	    nla_put_string(reply, XPON_LINE_PCS_PROFILE,
+ 	                   airoha_xpon_pcs_profile_name(xpon->pcs_profile)))
+ 		goto out;
++
++	/* GPON 专属：FEC 模式与省电（0x0c/0x0d/0x0e）状态 */
++	if (!epon) {
++		struct airoha_gpon_power_info power = {};
++
++		if (!airoha_xpon_gpon_get_power_info(xpon, &power)) {
++			if (nla_put_u32(reply, XPON_LINE_FEC_CFG, power.fec_cfg) ||
++			    nla_put_u32(reply, XPON_LINE_FEC_MODE, power.fec_reg) ||
++			    nla_put_u32(reply, XPON_LINE_PEE_COUNT, power.pee_count) ||
++			    nla_put_u32(reply, XPON_LINE_PST_MODE, power.pst_mode) ||
++			    nla_put_u8(reply, XPON_LINE_PST_POWER_SHORTAGE,
++				       power.pst_power_shortage) ||
++			    nla_put_u32(reply, XPON_LINE_BER_INTERVAL,
++				       power.ber_interval))
++				goto out;
++		}
++	}
+ 	nla_nest_end(reply, group);
+ 
+ 	group = nla_nest_start(reply, AIROHA_XPON_ATTR_FRONTEND);
+@@ -371,6 +389,23 @@ static int pon_line_debug_show(struct seq_file *m, void *unused)
+ 	           xpon->pcs_profile_valid ?
+ 	                   airoha_xpon_pcs_profile_name(xpon->pcs_profile) :
+ 	                   "none");
++	/* 仅 GPON：XGPON 下 gpon_priv 可能是上一轮残留，不能沿用 !is_epon */
++	if ((xpon->active_mode_valid ? xpon->active_mode :
++				      xpon->configured_mode) == AIROHA_XPON_MODE_GPON) {
++		struct airoha_gpon_power_info power = {};
++
++		if (!airoha_xpon_gpon_get_power_info(xpon, &power))
++			seq_printf(m,
++				   "fec_cfg: %u\n"
++				   "fec_mode: %u\n"
++				   "pee_count: %u\n"
++				   "pst_mode: %u\n"
++				   "pst_power_shortage: %d\n"
++				   "ber_interval: %u\n",
++				   power.fec_cfg, power.fec_reg, power.pee_count,
++				   power.pst_mode, power.pst_power_shortage,
++				   power.ber_interval);
++	}
+ 	mutex_unlock(&xpon->state_lock);
+ 	return 0;
+ }
 diff --git a/airoha-xpon/src/airoha-xpon-epon-hw.c b/airoha-xpon/src/airoha-xpon-epon-hw.c
 new file mode 100644
 index 0000000..169f9b7
@@ -1238,10 +1298,10 @@ index 0000000..700b440
 +#endif /* _AIROHA_XPON_GPON_REGS_H_ */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.c b/airoha-xpon/src/airoha-xpon-gpon.c
 new file mode 100644
-index 0000000..e5cf0f4
+index 0000000..bc4da91
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.c
-@@ -0,0 +1,4170 @@
+@@ -0,0 +1,4201 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Airoha AN7581 GPON 线路层
@@ -3021,6 +3081,37 @@ index 0000000..e5cf0f4
 +	return 0;
 +}
 +EXPORT_SYMBOL_GPL(airoha_xpon_gpon_set_fec_mode);
++
++/**
++ * airoha_xpon_gpon_get_power_info - 汇总 FEC 与省电诊断信息
++ * @xpon: XPON 设备
++ * @out:  输出结构
++ *
++ * 供 netlink（ponctl / LuCI）与 debugfs 读取。FEC 寄存器值实时回读，
++ * 其余字段取自私有结构，均无需额外加锁（单写多读的 u32/bool）。
++ */
++int airoha_xpon_gpon_get_power_info(struct airoha_xpon *xpon,
++				    struct airoha_gpon_power_info *out)
++{
++	struct airoha_gpon_priv *priv;
++
++	if (!xpon || !out)
++		return -EINVAL;
++
++	priv = xpon->gpon_priv;
++	if (!priv)
++		return -ENODEV;
++
++	out->fec_cfg = priv->fec_mode;
++	out->fec_reg = xpon->xgpon_base ?
++		(airoha_xgpon_read(xpon, AIROHA_XGPON_FEC_MODE_REG) & 0x3) : 0;
++	out->pee_count = priv->pee_count;
++	out->pst_mode = priv->pst_mode;
++	out->pst_power_shortage = priv->pst_power_shortage;
++	out->ber_interval = priv->ber_interval;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(airoha_xpon_gpon_get_power_info);
 +
 +int airoha_xpon_gpon_program_identity(struct airoha_xpon *xpon)
 +{
@@ -5414,10 +5505,10 @@ index 0000000..e5cf0f4
 + */
 diff --git a/airoha-xpon/src/airoha-xpon-gpon.h b/airoha-xpon/src/airoha-xpon-gpon.h
 new file mode 100644
-index 0000000..1a04aa3
+index 0000000..993c144
 --- /dev/null
 +++ b/airoha-xpon/src/airoha-xpon-gpon.h
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,126 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Airoha AN7581 GPON 线路层 —— 对外接口
@@ -5484,6 +5575,19 @@ index 0000000..1a04aa3
 +
 +/* ---- GEM / T-CONT ---- */
 +int  airoha_xpon_gpon_set_fec_mode(struct airoha_xpon *xpon, u32 mode);
++
++/* FEC / 省电诊断信息（PLOAM 0x0c/0x0d/0x0e 与 FEC 配置） */
++struct airoha_gpon_power_info {
++	u32  fec_cfg;			/* 配置值：0 仅上行 1 双向 2 关闭 3 仅下行 */
++	u32  fec_reg;			/* 寄存器实际 bit[1:0] */
++	u32  pee_count;			/* Power_Emergency 计数 */
++	u32  pst_mode;			/* Power_Shortage 省电模式 */
++	bool pst_power_shortage;	/* 掉电标志 */
++	u32  ber_interval;		/* BER 监测间隔 */
++};
++
++int  airoha_xpon_gpon_get_power_info(struct airoha_xpon *xpon,
++				     struct airoha_gpon_power_info *out);
 +int  airoha_xpon_gpon_set_gem_info(struct airoha_xpon *xpon, u16 gem_port,
 +				   bool upstream, bool encrypt);
 +int  airoha_xpon_gpon_set_alloc_id(struct airoha_xpon *xpon, u8 tcont,
@@ -5909,6 +6013,24 @@ index 8359949..cca1bf2 100644
  	},
  	{
  		.mode = AIROHA_XPON_MODE_XGPON,
+diff --git a/airoha-xpon/src/airoha-xpon-netlink.h b/airoha-xpon/src/airoha-xpon-netlink.h
+index 85d166d..19a8548 100644
+--- a/airoha-xpon/src/airoha-xpon-netlink.h
++++ b/airoha-xpon/src/airoha-xpon-netlink.h
+@@ -51,6 +51,13 @@ enum airoha_xpon_line_attr {
+ 	XPON_LINE_PCS_SYNC,
+ 	XPON_LINE_PCS_PROFILE_VALID,
+ 	XPON_LINE_PCS_PROFILE,
++	/* 追加在末尾：旧 ponctl 不认识这些属性时会被忽略，数值不位移 */
++	XPON_LINE_FEC_CFG,
++	XPON_LINE_FEC_MODE,
++	XPON_LINE_PEE_COUNT,
++	XPON_LINE_PST_MODE,
++	XPON_LINE_PST_POWER_SHORTAGE,
++	XPON_LINE_BER_INTERVAL,
+ };
+ 
+ enum airoha_xpon_frontend_attr {
 diff --git a/airoha-xpon/src/airoha-xpon-private.h b/airoha-xpon/src/airoha-xpon-private.h
 index ed050a9..aef712e 100644
 --- a/airoha-xpon/src/airoha-xpon-private.h
